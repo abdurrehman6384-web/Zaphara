@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">Zaiphra</string>
+    <string name="accessibility_service_description">Zaiphra requires accessibility access to perform screen interactions, clicks, and global navigation on your behalf.</string>
+    <string name="rgs_accessibility_label">RGS device control</string>
+    <string name="rgs_accessibility_desc">Lets RGS AI read the screen, tap labelled controls, type and scroll when you ask. Only active while enabled.</string>
+</resources>

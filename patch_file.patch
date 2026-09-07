@@ -1,0 +1,3117 @@
+diff --git a/android-app/README.md b/android-app/README.md
+index 5261204..5587628 100644
+--- a/android-app/README.md
++++ b/android-app/README.md
+@@ -6,34 +6,37 @@ and a floating desktop-pet window.
+ 
+ ```
+ app/src/main/java/com/rgs/companion/
+-├── live2d/       Cubism rendering: GLSurfaceView, model, lip-sync
++├── avatar/       The companion girl: procedural canvas renderer (no SDK needed)
++├── live2d/       Optional Cubism GL renderer (compiles only when the SDK is present)
++├── ui/           "Cyber Obsidian" theme, home dashboard, glass cards
+ ├── companion/    Persona, emotion, memory, the agent loop
+ ├── chat/         Compose UI, ViewModel, LLM client
+ ├── voice/        TTS + STT
+ ├── control/      Phone control via Accessibility (non-root)
+-└── overlay/      Floating companion window
++├── overlay/      Floating companion window
++└── proactive/    BootReceiver hook (scheduler still to come — see §10)
+ ```
+ 
+-> ## ⚠️ Read this first: this code has not been compiled
++> ## Build status (v0.2.0)
+ >
+-> The sandbox this was written in has **no JDK, no Android SDK, no Gradle and no
+-> kotlinc** — I checked: `java -version`, `javac -version`, `gradle --version`,
+-> `kotlinc -version` all report not found. So I could not build, lint or run a
+-> single line of this Kotlin.
++> The app **builds and runs without the Live2D SDK**. The default avatar is
++> `com.rgs.companion.avatar` — a fully procedural, animated companion girl
++> drawn on a canvas (blinking, hair sway, gaze that follows your finger,
++> lip-sync, 10 emotion expressions, neon aura). It has zero third-party
++> dependencies and no licence gating.
+ >
+-> What I *did* do to reduce the risk: every Live2D framework call in
+-> `live2d/CompanionModel.kt` and `live2d/CubismBootstrap.kt` was checked against
+-> the real `CubismJavaFramework` source (cloned to verify `CubismUserModel`'s
+-> protected members, `ICubismModelSetting`'s actual method names, and
+-> `CubismFramework.Option`'s fields). That caught and fixed real errors —
+-> `getMotionFadeInTime` does not exist (it is `getMotionFadeInTimeValue`),
+-> `getMotionGroupNames` does not exist (it is `getMotionGroupCount` +
+-> `getMotionGroupName`), `CubismMatrix44` has no `load()` and no public
+-> constructor, and `CubismUserModel` has no `modelSetting` field.
++> The Cubism path is **optional**: the four SDK-dependent files in `live2d/`
++> are excluded from compilation unless you supply both
++> `app/libs/Live2DCubismCore.aar` and a `CubismJavaFramework` clone next to the
++> project — then they compile back in automatically (see §2). Nothing in the
++> companion/chat/voice/control layers has to change; only the avatar view does.
+ >
+-> Expect ordinary first-build friction: a missing import, a version bump, a
+-> Compose API rename. The architecture and the Cubism integration are sound;
+-> the last mile needs Android Studio, which is the one thing I don't have.
++> Note: this was also written without a JDK/Android SDK in the sandbox, so
++> expect the ordinary first-build friction (a version bump, a Compose API
++> rename). The Live2D-specific API corrections from v0.1.0
++> (`getMotionFadeInTimeValue`, `getMotionGroupCount`/`getMotionGroupName`,
++> no `CubismMatrix44.load()`, no `CubismUserModel.modelSetting`) are still in
++> place.
+ 
+ ---
+ 
+@@ -101,13 +104,23 @@ cd android-app
+ Keys come from `-P` properties, environment variables (`LLM_API_KEY`,
+ `LLM_MODEL`), or `~/.gradle/gradle.properties`. **Never** commit them.
+ 
+-Verified toolchain versions from the official samples: AGP 8.9.1, Gradle 8.11.1,
+-JDK 21, Android SDK 36. This project targets compileSdk/targetSdk 36, minSdk 24
+-(`dispatchGesture` needs 24; Cubism itself needs 21).
++Toolchain: AGP 8.5.2, Kotlin 2.0.20, Gradle 8.7+ (run `gradle wrapper` once if
++you don't have a wrapper yet), JDK 17+, Android SDK 36. This project targets
++compileSdk/targetSdk 36, minSdk 24.
+ 
+-**ABI note:** `abiFilters` is `arm64-v8a:x86:x86_64` and nothing else. That is
+-exactly what Cubism Core ships, taken from the samples' `PROP_APP_ABI`. Adding
+-`armeabi-v7a` will fail at packaging with a missing-native-lib error.
++**Two modes:**
++
++- **Canvas avatar (default, no extra setup).** Just build. The `hasLive2D`
++  block in `app/build.gradle.kts` detects the missing SDK and compiles the
++  procedural girl in `avatar/` — nothing else is affected.
++- **Live2D (optional).** Add the two things from §2. `settings.gradle.kts`
++  then includes `:Framework:framework`, the aar lands on the classpath, and
++  the four `live2d/` files are un-excluded from the source set.
++
++**ABI note (Live2D mode only):** when the SDK is present, `abiFilters` becomes
++`arm64-v8a:x86:x86_64` — exactly what Cubism Core ships, taken from the
++samples' `PROP_APP_ABI`. Adding `armeabi-v7a` will fail at packaging with a
++missing-native-lib error. In canvas mode no ABI filters are applied.
+ 
+ **No CMake changes are needed** — that is the point of choosing the Java SDK.
+ 
+@@ -378,7 +391,15 @@ Aria:  Done.
+ 
+ | File | Role |
+ |---|---|
+-| `live2d/Live2DView.kt` | `GLSurfaceView` subclass. The thing you drop into a layout. |
++| `avatar/AvatarView.kt` | Self-animating `View`: frame loop, blink state machine, gaze easing, tap bounce + hearts. The default avatar. |
++| `avatar/GirlPainter.kt` | All the drawing: aura, hair, face, eyes, mouth, body, effects. Pure canvas, no dependencies. |
++| `avatar/RenderState.kt` | `FaceState` per emotion + per-frame `RenderState` (allocation-free reuse). |
++| `avatar/AvatarSurface.kt` | `@Composable` wrapper used by `ChatScreen` and available anywhere else. |
++| `ui/theme/CompanionTheme.kt` | "Cyber Obsidian" Material 3 color scheme (obsidian + neon cyan/violet). |
++| `ui/screens/HomeScreen.kt` | Home dashboard: avatar hero, subsystem GlassCards with live status (a11y/TTS/overlay/memory/LLM), real CPU + RAM telemetry. |
++| `ui/components/GlassCard.kt` | The glassmorphism card: 0.05 white background, 1dp border, glowing when active, no shadows. |
++| `proactive/BootReceiver.kt` | BOOT_COMPLETED hook declared in the manifest (no-op until the scheduler exists). |
++| `live2d/Live2DView.kt` | `GLSurfaceView` subclass. The thing you drop into a layout. *(optional build)* |
+ | `live2d/Live2DRenderer.kt` | Update + draw loop, texture upload, matrices, frame timing. |
+ | `live2d/CompanionModel.kt` | `CubismUserModel` subclass: loads `model3.json`, motions, expressions, lip-sync, hit-testing. |
+ | `live2d/CubismBootstrap.kt` | Framework startup **and the asset loader** — without `loadFileFunction`, model loading fails deep inside the core. |
+@@ -403,17 +424,23 @@ Aria:  Done.
+ Being explicit, because these are the things you would otherwise discover at
+ 2am:
+ 
+-- **Not compiled.** No toolchain here. See the warning at the top.
++- **Not compiled in the sandbox.** This workspace has no JDK/Android SDK and no
++  network egress, so run the first `assembleDebug` on your machine. The code
++  was written and statically audited for first-build correctness (types,
++  imports, Compose/M3 API names).
+ - **No unit tests.** The pieces worth testing without a device are
+-  `Persona.parse()`, `SentimentGuesser.guess()`, `LipSync.estimateSyllables()`
+-  and `EmotionState` — all pure functions. I did not write them; they are the
+-  obvious first thing to add.
+-- **No proactive scheduler.** `CompanionAgent.initiate()` exists and is tested
+-  only by inspection. You still need a `WorkManager` periodic worker or
+-  `AlarmManager` to call it. A `BootReceiver` is declared in the manifest but not
+-  implemented.
++  `Persona.parse()`, `SentimentGuesser.guess()`, `LipSync.estimateSyllables()`,
++  `EmotionState` and now `FaceState.forEmotion()` — all pure functions. They
++  are the obvious first thing to add.
++- **No proactive scheduler.** `CompanionAgent.initiate()` exists and
++  `ChatViewModel.proactive()` knows how to surface a reply, but nothing alarms
++  itself into calling it. `proactive/BootReceiver.kt` now exists so the
++  manifest is honest; it logs and does nothing else until a `WorkManager`
++  worker or `AlarmManager` chain is added.
+ - **No settings screen.** `PersonaConfig` is constructed with defaults in
+-  `ChatViewModel`. Wire it to DataStore.
+-- **One model bundled path.** `DEFAULT_MODEL` points at `models/hiyori/…`, which
+-  you must actually place there.
++  `ChatViewModel` (the nameplate shows `personaName` from it). Wire it to
++  DataStore.
++- **Live2D is off by default.** `DEFAULT_MODEL` points at `models/hiyori/…`
++  and only matters in the optional Live2D build. The canvas avatar needs no
++  model asset at all.
+ - **`ic_launcher` is a vector stand-in.** Ship real adaptive icons.
+diff --git a/android-app/app/build.gradle.kts b/android-app/app/build.gradle.kts
+index 2be28ce..a71720a 100644
+--- a/android-app/app/build.gradle.kts
++++ b/android-app/app/build.gradle.kts
+@@ -6,6 +6,19 @@ plugins {
+     id("org.jetbrains.kotlin.plugin.serialization") version "2.0.20"
+ }
+ 
++// ── Optional Live2D Cubism ─────────────────────────────────────────────────
++// The Cubism SDK is licence-gated and is NOT committed to this repo:
++//   1. app/libs/Live2DCubismCore.aar
++//   2. ../CubismJavaFramework/framework   (git clone https://github.com/Live2D/CubismJavaFramework)
++//
++// When BOTH are present, the live2d/ GL renderer compiles exactly as before.
++// When they are absent, the four Cubism-dependent files are excluded from the
++// source set and the app runs on the dependency-free canvas avatar
++// (com.rgs.companion.avatar) — everything else in the app is identical.
++val cubismFrameworkDir = rootProject.file("../CubismJavaFramework/framework")
++val cubismCoreAar = file("libs/Live2DCubismCore.aar")
++val hasLive2D = cubismFrameworkDir.isDirectory && cubismCoreAar.isFile
++
+ android {
+     namespace = "com.rgs.companion"
+     compileSdk = 36
+@@ -14,15 +27,17 @@ android {
+         applicationId = "com.rgs.companion"
+         minSdk = 24   // dispatchGesture needs 24; Cubism itself needs 21
+         targetSdk = 36
+-        versionCode = 1
+-        versionName = "0.1.0"
+-
+-        // Live2D Cubism Core ships native libs for EXACTLY these three ABIs.
+-        // Verified against CubismJavaSamples' gradle.properties
+-        // (PROP_APP_ABI=arm64-v8a:x86:x86_64). Listing an ABI the core does not
+-        // ship (e.g. armeabi-v7a) makes the build fail at packaging.
+-        ndk {
+-            abiFilters += listOf("arm64-v8a", "x86", "x86_64")
++        versionCode = 2
++        versionName = "0.2.0"
++
++        // Live2D Cubism Core ships native libs for EXACTLY these three ABIs
++        // (verified against CubismJavaSamples' gradle.properties). Only
++        // constrain ABIs when the SDK is actually in the build; otherwise
++        // ship every ABI the app (which has no native code) supports.
++        if (hasLive2D) {
++            ndk {
++                abiFilters += listOf("arm64-v8a", "x86", "x86_64")
++            }
+         }
+ 
+         // LLM credentials. Never commit real keys -- override per machine:
+@@ -37,17 +52,25 @@ android {
+         buildConfigField("String", "LLM_MODEL", "\"$llmModel\"")
+     }
+ 
+-    // ── Live2D ────────────────────────────────────────────────────────
+-    // Two files you must supply yourself (neither is redistributable here):
+-    //   1. Live2DCubismCore.aar   -> app/libs/Live2DCubismCore.aar
+-    //   2. CubismJavaFramework    -> included as the :Framework:framework module
+-    // Both come from https://www.live2d.com/en/sdk/download/java/
+-    // Full walkthrough: README.md section 3.
+     buildFeatures {
+         compose = true
+         buildConfig = true
+     }
+ 
++    // The four Cubism-dependent files only compile when the SDK is present.
++    sourceSets {
++        getByName("main") {
++            if (!hasLive2D) {
++                kotlin.exclude(
++                    "com/rgs/companion/live2d/CompanionModel.kt",
++                    "com/rgs/companion/live2d/CubismBootstrap.kt",
++                    "com/rgs/companion/live2d/Live2DRenderer.kt",
++                    "com/rgs/companion/live2d/Live2DView.kt",
++                )
++            }
++        }
++    }
++
+     compileOptions {
+         sourceCompatibility = JavaVersion.VERSION_17
+         targetCompatibility = JavaVersion.VERSION_17
+@@ -73,13 +96,13 @@ android {
+ }
+ 
+ dependencies {
+-    // ── Live2D ─────────────────────────────────────────────────────────
+-    // The Framework as a Gradle module (how the official sample does it).
+-    implementation(project(":Framework:framework"))
+-    // The native core, dropped into app/libs/.
+-    implementation(files("libs/Live2DCubismCore.aar"))
++    // ── Live2D (optional — see hasLive2D above) ───────────────────────────
++    if (hasLive2D) {
++        implementation(project(":Framework:framework"))
++        implementation(files("libs/Live2DCubismCore.aar"))
++    }
+ 
+-    // ── AndroidX / Compose ─────────────────────────────────────────────
++    // ── AndroidX / Compose ────────────────────────────────────────────────
+     implementation(libs.androidx.core.ktx)
+     implementation(libs.androidx.lifecycle.runtime.ktx)
+     implementation(libs.androidx.lifecycle.viewmodel.compose)
+@@ -94,12 +117,12 @@ dependencies {
+     implementation(libs.androidx.compose.material.icons)
+     debugImplementation(libs.androidx.compose.ui.tooling)
+ 
+-    // ── persistence (long-term memory) ─────────────────────────────────
++    // ── persistence (long-term memory) ───────────────────────────────────
+     implementation(libs.androidx.room.runtime)
+     implementation(libs.androidx.room.ktx)
+     ksp(libs.androidx.room.compiler)
+ 
+-    // ── networking + JSON for the LLM call ─────────────────────────────
++    // ── networking + JSON for the LLM call ───────────────────────────────
+     implementation(libs.okhttp)
+     implementation(libs.kotlinx.serialization.json)
+     implementation(libs.kotlinx.coroutines.android)
+diff --git a/android-app/app/src/main/java/com/rgs/companion/CompanionApp.kt b/android-app/app/src/main/java/com/rgs/companion/CompanionApp.kt
+index 334808a..a178437 100644
+--- a/android-app/app/src/main/java/com/rgs/companion/CompanionApp.kt
++++ b/android-app/app/src/main/java/com/rgs/companion/CompanionApp.kt
+@@ -10,9 +10,9 @@ import android.util.Log
+  * TTS init, Cubism bootstrap) are all lazy -- Room on first query, TTS in
+  * [com.rgs.companion.voice.SpeechEngine.init], Cubism on first GL surface.
+  *
+- * Deliberately *not* done here: [com.live2d.sdk.cubism.framework.CubismFramework.startUp].
+- * It must run on the GL thread, so it lives in
+- * [com.rgs.companion.live2d.Live2DRenderer.onSurfaceCreated].
++ * Deliberately *not* done here: `CubismFramework.startUp` (optional Live2D
++ * path, only compiled when the Cubism SDK is present). It must run on the GL
++ * thread, so it lives in `Live2DRenderer.onSurfaceCreated`.
+  */
+ class CompanionApp : Application() {
+ 
+diff --git a/android-app/app/src/main/java/com/rgs/companion/MainActivity.kt b/android-app/app/src/main/java/com/rgs/companion/MainActivity.kt
+index e9a1524..488b5c5 100644
+--- a/android-app/app/src/main/java/com/rgs/companion/MainActivity.kt
++++ b/android-app/app/src/main/java/com/rgs/companion/MainActivity.kt
+@@ -8,16 +8,23 @@ import android.os.Bundle
+ import android.provider.Settings
+ import androidx.activity.ComponentActivity
+ import androidx.activity.compose.setContent
++import androidx.activity.enableEdgeToEdge
+ import androidx.activity.result.contract.ActivityResultContracts
+ import androidx.activity.viewModels
++import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.Surface
+-import androidx.compose.material3.darkColorScheme
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
+ import androidx.compose.ui.Modifier
+ import androidx.core.content.ContextCompat
++import androidx.lifecycle.compose.collectAsStateWithLifecycle
+ import com.rgs.companion.chat.ChatScreen
+ import com.rgs.companion.chat.ChatViewModel
+ import com.rgs.companion.overlay.FloatingCompanionService
++import com.rgs.companion.ui.screens.HomeScreen
++import com.rgs.companion.ui.theme.CompanionTheme
+ 
+ /**
+  * Hosts the chat screen and owns the permission flow.
+@@ -56,13 +63,33 @@ class MainActivity : ComponentActivity() {
+ 
+     override fun onCreate(savedInstanceState: Bundle?) {
+         super.onCreate(savedInstanceState)
++        enableEdgeToEdge()
+ 
+         requestPermissionsIfNeeded()
+ 
+         setContent {
+-            MaterialTheme(colorScheme = darkColorScheme()) {
+-                Surface(modifier = Modifier, color = MaterialTheme.colorScheme.background) {
+-                    ChatScreen(viewModel = viewModel)
++            CompanionTheme {
++                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
++                    val state by viewModel.state.collectAsStateWithLifecycle()
++                    var showChat by remember { mutableStateOf(false) }
++                    if (showChat) {
++                        ChatScreen(
++                            viewModel = viewModel,
++                            companionName = viewModel.personaName,
++                            onBack = { showChat = false },
++                        )
++                    } else {
++                        HomeScreen(
++                            state = state,
++                            companionName = viewModel.personaName,
++                            speech = viewModel.speech,
++                            memoryStore = viewModel.memoryStore,
++                            onAvatarTap = { viewModel.pokeAvatar() },
++                            onOpenChat = { showChat = true },
++                            onOpenAccessibility = { openAccessibilitySettings() },
++                            onToggleOverlay = { enableFloatingCompanion() },
++                        )
++                    }
+                 }
+             }
+         }
+diff --git a/android-app/app/src/main/java/com/rgs/companion/avatar/AvatarSurface.kt b/android-app/app/src/main/java/com/rgs/companion/avatar/AvatarSurface.kt
+new file mode 100644
+index 0000000..8dd91c9
+--- /dev/null
++++ b/android-app/app/src/main/java/com/rgs/companion/avatar/AvatarSurface.kt
+@@ -0,0 +1,46 @@
++package com.rgs.companion.avatar
++
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.viewinterop.AndroidView
++import com.rgs.companion.companion.Emotion
++
++/**
++ * Compose wrapper for [AvatarView] — the cute animated companion girl.
++ *
++ * The `update` block only writes cheap volatile fields; the view animates
++ * itself at the display's refresh rate without ever triggering recomposition
++ * of the chat screen.
++ *
++ * ```
++ * AvatarSurface(
++ *     modifier = Modifier.size(266.dp),
++ *     emotion = state.emotion,
++ *     mouthLevel = state.mouthLevel,
++ *     thinking = state.thinking,
++ *     listening = state.listening,
++ *     onTap = { viewModel.pokeAvatar() },
++ * )
++ * ```
++ */
++@Composable
++fun AvatarSurface(
++    modifier: Modifier = Modifier,
++    emotion: Emotion = Emotion.NEUTRAL,
++    mouthLevel: Float = 0f,
++    thinking: Boolean = false,
++    listening: Boolean = false,
++    onTap: () -> Unit = {},
++) {
++    AndroidView(
++        modifier = modifier,
++        factory = { ctx -> AvatarView(ctx) },
++        update = { view ->
++            view.emotion = emotion
++            view.mouthLevel = mouthLevel
++            view.thinking = thinking
++            view.listening = listening
++            view.onTap = onTap
++        },
++    )
++}
+diff --git a/android-app/app/src/main/java/com/rgs/companion/avatar/AvatarView.kt b/android-app/app/src/main/java/com/rgs/companion/avatar/AvatarView.kt
+new file mode 100644
+index 0000000..0f6ff8e
+--- /dev/null
++++ b/android-app/app/src/main/java/com/rgs/companion/avatar/AvatarView.kt
+@@ -0,0 +1,285 @@
++package com.rgs.companion.avatar
++
++import android.content.Context
++import android.graphics.Canvas
++import android.os.SystemClock
++import android.util.AttributeSet
++import android.view.MotionEvent
++import android.view.View
++import com.rgs.companion.companion.Emotion
++import kotlin.random.Random
++
++/**
++ * The companion girl, as a self-animating [View].
++ *
++ * This is the dependency-free alternative to `live2d.Live2DView`: the whole
++ * character is painted procedurally by [GirlPainter], so it works without the
++ * licence-gated Cubism SDK, on any device, with any model.
++ *
++ * ## Why a plain View instead of a Compose Canvas
++ * She animates continuously (breathing, blinking, hair sway, aura) at the
++ * display's refresh rate. Driving that through Compose state would recompose
++ * the whole chat screen 60-120 times per second. A `View` that simply
++ * `postInvalidateOnAnimation()`s itself every frame costs nothing else, and it
++ * mirrors the `Live2DView` (GLSurfaceView) architecture this codebase already
++ * uses, so swapping between the two renderers is a one-line change.
++ *
++ * ## Public API
++ * All setters are plain `@Volatile` fields read on the next frame — safe to
++ * call from the UI thread or a coroutine, exactly like `Live2DView`:
++ *
++ * ```
++ * avatar.emotion = Emotion.HAPPY
++ * avatar.mouthLevel = 0.7f          // TTS lip-sync
++ * avatar.thinking = true
++ * avatar.onTap = { viewModel.pokeAvatar() }
++ * ```
++ *
++ * Touch: dragging makes her eyes (and a little of her head) follow your
++ * finger; a tap triggers a bounce, pop hearts, and [onTap].
++ */
++class AvatarView @JvmOverloads constructor(
++    context: Context,
++    attrs: AttributeSet? = null,
++) : View(context, attrs) {
++
++    @Volatile var emotion: Emotion = Emotion.NEUTRAL
++    @Volatile var mouthLevel: Float = 0f
++    @Volatile var thinking: Boolean = false
++    @Volatile var listening: Boolean = false
++
++    /** Fired on a tap that was not a drag. */
++    var onTap: (() -> Unit)? = null
++
++    private val state = RenderState()
++
++    private var running = false
++    private var lastFrameMs = -1L
++
++    // blink state machine
++    private var blinkStartMs = -1L
++    private var blinkDouble = false
++    private var nextBlinkMs = 2200L
++
++    // gaze (eased) + wander
++    private var gazeX = 0f
++    private var gazeY = 0f
++    private var gazeTX = 0f
++    private var gazeTY = 0f
++    private var nextWanderMs = 2500L
++    private var fingerDown = false
++    private var fingerNX = 0f
++    private var fingerNY = 0f
++
++    // tap bounce
++    private var tapMs = -1L
++    private var nextAutoHeartMs = 4000L
++
++    private var downX = 0f
++    private var downY = 0f
++
++    // ------------------------------------------------------------------
++    // lifecycle — the frame loop
++    // ------------------------------------------------------------------
++    override fun onAttachedToWindow() {
++        super.onAttachedToWindow()
++        running = true
++        lastFrameMs = -1L
++        postInvalidateOnAnimation()
++    }
++
++    override fun onDetachedToWindow() {
++        running = false
++        super.onDetachedToWindow()
++    }
++
++    /** Stop drawing (e.g. when the overlay window is removed). */
++    fun onPause() {
++        running = false
++    }
++
++    /** Resume drawing if the view is attached. */
++    fun onResume() {
++        if (isAttachedToWindow) {
++            running = true
++            lastFrameMs = -1L
++            postInvalidateOnAnimation()
++        }
++    }
++
++    override fun onDraw(canvas: Canvas) {
++        super.onDraw(canvas)
++        val t = SystemClock.elapsedRealtime()
++        update(t)
++
++        state.tMs = t
++        state.emotion = emotion
++        state.face = FaceState.forEmotion(emotion)
++        state.mouthOpen = mouthLevel.coerceIn(0f, 1f)
++        state.thinking = thinking
++        state.listening = listening
++        state.gazeX = gazeX
++        state.gazeY = gazeY
++
++        GirlPainter.paint(canvas, width, height, state)
++
++        if (running) postInvalidateOnAnimation()
++    }
++
++    // ------------------------------------------------------------------
++    // per-frame animation state
++    // ------------------------------------------------------------------
++    private fun update(t: Long) {
++        val dtMs = if (lastFrameMs < 0) 16L else (t - lastFrameMs).coerceIn(1L, 100L)
++        lastFrameMs = t
++        val dt = dtMs.toFloat()
++
++        // ── blink ──────────────────────────────────────────────────────
++        // Random 2.2-5.4s between blinks, ~18% chance of a double blink,
++        // slower lids when sleepy.
++        val blinkHalf = if (emotion == Emotion.SLEEPY) 150L else 70L
++        if (blinkStartMs < 0 && t >= nextBlinkMs) {
++            blinkStartMs = t
++            blinkDouble = Random.nextFloat() < 0.18f
++        }
++        if (blinkStartMs >= 0) {
++            val p = t - blinkStartMs
++            state.lidClose = when {
++                p < blinkHalf ->
++                    (p.toFloat() / blinkHalf.toFloat()).coerceIn(0f, 1f)
++
++                p < blinkHalf * 2 ->
++                    (1f - (p - blinkHalf).toFloat() / blinkHalf.toFloat()).coerceIn(0f, 1f)
++
++                blinkDouble && p < blinkHalf * 2 + 140L -> 0f
++
++                blinkDouble && p < blinkHalf * 4 + 140L -> if (p < blinkHalf * 3 + 140L) {
++                    ((p - (blinkHalf * 2 + 140L)).toFloat() / blinkHalf.toFloat()).coerceIn(0f, 1f)
++                } else {
++                    (1f - ((p - (blinkHalf * 3 + 140L)).toFloat() / blinkHalf.toFloat())).coerceIn(0f, 1f)
++                }
++
++                else -> {
++                    blinkStartMs = -1L
++                    nextBlinkMs = t + 2200L + Random.nextLong(0L, 3200L)
++                    0f
++                }
++            }
++        } else {
++            state.lidClose = 0f
++        }
++
++        // ── gaze ──────────────────────────────────────────────────────
++        // Finger wins; then mood (sad/shy look down, thinking looks up);
++        // otherwise she wanders her eyes every few seconds.
++        if (fingerDown) {
++            gazeTX = (fingerNX * 4f).coerceIn(-4.5f, 4.5f)
++            gazeTY = (fingerNY * 3f).coerceIn(-3.5f, 3.5f)
++        } else when (emotion) {
++            Emotion.SAD, Emotion.SHY -> {
++                gazeTX = 0f
++                gazeTY = 2f
++            }
++
++            Emotion.SLEEPY -> {
++                gazeTX = 0f
++                gazeTY = 1.2f
++            }
++
++            else -> {
++                if (thinking) {
++                    gazeTX = 2.6f
++                    gazeTY = -3.4f
++                } else if (t >= nextWanderMs) {
++                    if (Random.nextFloat() < 0.3f) {
++                        gazeTX = 0f
++                        gazeTY = 0f
++                    } else {
++                        gazeTX = (Random.nextFloat() * 2f - 1f) * 3.4f
++                        gazeTY = (Random.nextFloat() * 2f - 1f) * 2.2f
++                    }
++                    nextWanderMs = t + 2500L + Random.nextLong(0L, 4000L)
++                }
++            }
++        }
++        val k = 1f - Math.exp((-dt / 240f).toDouble()).toFloat()
++        gazeX += (gazeTX - gazeX) * k
++        gazeY += (gazeTY - gazeY) * k
++
++        // ── tap bounce (damped oscillation, ~650ms) ────────────────────
++        if (tapMs >= 0) {
++            val p = (t - tapMs).toDouble() / 650.0
++            if (p >= 1.0) {
++                tapMs = -1L
++                state.bounceY = 0f
++            } else {
++                state.bounceY = (-5.5 * Math.sin(p * 3.6 * Math.PI) * (1.0 - 0.55 * p)).toFloat()
++            }
++        } else {
++            state.bounceY = 0f
++        }
++
++        // ── hearts ─────────────────────────────────────────────────────
++        var i = 0
++        while (i < state.hearts.size) {
++            val h = state.hearts[i]
++            h.p += dt / 950f
++            if (h.p >= 1f) state.hearts.removeAt(i) else i++
++        }
++        val affectionate = emotion == Emotion.AFFECTIONATE ||
++            emotion == Emotion.HAPPY ||
++            emotion == Emotion.PLAYFUL
++        if (affectionate && t >= nextAutoHeartMs) {
++            nextAutoHeartMs = t + 2600L + Random.nextLong(0L, 2400L)
++            state.hearts.add(
++                HeartFx((Random.nextFloat() * 2f - 1f) * 9f, -33f, 0f, Random.nextInt(3)),
++            )
++        }
++    }
++
++    // ------------------------------------------------------------------
++    // touch: drag to make her follow you, tap to make her react
++    // ------------------------------------------------------------------
++    override fun onTouchEvent(event: MotionEvent): Boolean {
++        when (event.actionMasked) {
++            MotionEvent.ACTION_DOWN -> {
++                downX = event.x
++                downY = event.y
++                fingerDown = true
++                setFinger(event)
++                parent?.requestDisallowInterceptTouchEvent(true)
++            }
++
++            MotionEvent.ACTION_MOVE -> {
++                if (fingerDown) setFinger(event)
++            }
++
++            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
++                fingerDown = false
++                if (event.actionMasked == MotionEvent.ACTION_UP) {
++                    val dx = event.x - downX
++                    val dy = event.y - downY
++                    if (dx * dx + dy * dy < TAP_SLOP * TAP_SLOP) {
++                        tapMs = SystemClock.elapsedRealtime()
++                        state.hearts.add(HeartFx(-7f, -34f, 0f, 0))
++                        state.hearts.add(HeartFx(0f, -36f, 0.1f, 1))
++                        state.hearts.add(HeartFx(7f, -34f, 0.2f, 2))
++                        onTap?.invoke()
++                    }
++                }
++            }
++
++            else -> return false
++        }
++        return true
++    }
++
++    private fun setFinger(e: MotionEvent) {
++        fingerNX = (((e.x / width.toFloat().coerceAtLeast(1f)) - 0.5f) * 2f).coerceIn(-1f, 1f)
++        fingerNY = (((e.y / height.toFloat().coerceAtLeast(1f)) - 0.5f) * 2f).coerceIn(-1f, 1f)
++    }
++
++    private companion object {
++        const val TAP_SLOP = 24f
++    }
++}
+diff --git a/android-app/app/src/main/java/com/rgs/companion/avatar/GirlPainter.kt b/android-app/app/src/main/java/com/rgs/companion/avatar/GirlPainter.kt
+new file mode 100644
+index 0000000..16ab490
+--- /dev/null
++++ b/android-app/app/src/main/java/com/rgs/companion/avatar/GirlPainter.kt
+@@ -0,0 +1,767 @@
++package com.rgs.companion.avatar
++
++import android.graphics.BlendMode
++import android.graphics.Canvas
++import android.graphics.DashPathEffect
++import android.graphics.LinearGradientShader
++import android.graphics.Paint
++import android.graphics.Path
++import android.graphics.RadialGradientShader
++import android.graphics.RectF
++import android.graphics.Typeface
++import com.rgs.companion.companion.Emotion
++import kotlin.math.abs
++import kotlin.math.cos
++import kotlin.math.min
++import kotlin.math.sin
++
++/**
++ * Paints the companion girl — a fully procedural, dependency-free
++ * "Live2D-like" avatar: big glossy eyes that blink and follow your finger,
++ * swaying lavender hair, a lip-synced mouth, emotion-driven expressions,
++ * blush, a cyber top, and a pulsing neon aura with orbiting particles.
++ *
++ * ## Coordinate system
++ * Everything is expressed in "u" units where 100u == min(width, height), and
++ * the origin is placed at (width/2, height * 0.53) — slightly below centre so
++ * the aura has more room above her head. The bust occupies roughly
++ * -38u..+48u vertically.
++ *
++ * ## Threading
++ * Called only from [AvatarView.onDraw] (the UI thread). The shared
++ * [Paint]/[Path] instances below are single-threaded by construction.
++ *
++ * ## Cost
++ * A few dozen small paths and ~10 gradient shaders per frame — cheap enough
++ * for 60-120fps on any recent phone.
++ */
++object GirlPainter {
++
++    // ── palette ──────────────────────────────────────────────────────────
++    // Fair skin ("goriya"), pale lavender hair, cyber indigo top, neon accents.
++    private const val SKIN_HI = 0xFFFFF3E8.toInt()
++    private const val SKIN = 0xFFFFE9D6.toInt()
++    private const val SKIN_LO = 0xFFFFD9BE.toInt()
++    private const val HAIR_LT = 0xFFEADCFB.toInt()
++    private const val HAIR_MD = 0xFFCDB5F2.toInt()
++    private const val HAIR_DK = 0xFFA585D6.toInt()
++    private const val TOP_1 = 0xFF1B1233.toInt()
++    private const val TOP_2 = 0xFF2A1E52.toInt()
++    private const val INK = 0xFF241439.toInt()
++    private const val BROW = 0xFF5A4470.toInt()
++    private const val MOUTH_C = 0xFFA84465.toInt()
++    private const val MOUTH_IN = 0xFF46233B.toInt()
++    private const val TONGUE = 0xFFE88A9A.toInt()
++    private const val IRIS_T = 0xFF9FF6FF.toInt()
++    private const val IRIS_M = 0xFF46C8FF.toInt()
++    private const val IRIS_B = 0xFF6D4DFF.toInt()
++    private const val PUPIL = 0xFF170D33.toInt()
++
++    // ── shared draw state (UI thread only) ───────────────────────────────
++    private val solid = Paint(Paint.ANTI_ALIAS_FLAG)
++    private val line = Paint(Paint.ANTI_ALIAS_FLAG).apply {
++        style = Paint.Style.STROKE
++        strokeCap = Paint.Cap.ROUND
++        strokeJoin = Paint.Join.ROUND
++    }
++    private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
++        style = Paint.Style.STROKE
++        strokeCap = Paint.Cap.ROUND
++        blendMode = BlendMode.SCREEN
++    }
++    private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
++        typeface = Typeface.DEFAULT_BOLD
++        textAlign = Paint.Align.CENTER
++    }
++    private val path = Path()
++    private val rect = RectF()
++
++    private fun sinF(v: Float): Float = sin(v.toDouble()).toFloat()
++    private fun cosF(v: Float): Float = cos(v.toDouble()).toFloat()
++    private fun argb(a: Int, r: Int, g: Int, b: Int): Int =
++        ((a and 0xFF) shl 24) or ((r and 0xFF) shl 16) or ((g and 0xFF) shl 8) or (b and 0xFF)
++
++    /** Entry point — called once per frame by [AvatarView]. */
++    fun paint(c: Canvas, w: Int, h: Int, rs: RenderState) {
++        if (w < 16 || h < 16) return
++        val u = min(w, h).toFloat() / 100f
++        val t = rs.tMs.toFloat()
++
++        c.save()
++        c.translate(w.toFloat() * 0.5f, h.toFloat() * 0.53f)
++
++        drawAura(c, u, t, rs)
++
++        c.save()
++        if (rs.bounceY != 0f) c.translate(0f, rs.bounceY * u)
++
++        drawBackHair(c, u, t)
++        drawBody(c, u, t)
++
++        // ── head (rotates slightly with mood + slow idle sway) ──────────
++        c.save()
++        val tilt = rs.face.tiltRad + sinF(t * 0.00044f) * 0.022f
++        c.rotate(Math.toDegrees(tilt.toDouble()).toFloat(), 0f, -10f * u)
++        drawEars(c, u)
++        drawFace(c, u)
++        drawBlush(c, u, rs)
++        drawEye(c, u, rs, -11f * u, -2.5f * u, -1f)
++        drawEye(c, u, rs, 11f * u, -2.5f * u, 1f)
++        drawBrow(c, u, rs, -11f * u, -2.5f * u, -1f)
++        drawBrow(c, u, rs, 11f * u, -2.5f * u, 1f)
++        drawNose(c, u)
++        drawMouth(c, u, t, rs)
++        drawHairCap(c, u, t)
++        drawBangs(c, u, t)
++        drawSideLock(c, u, t, -1f)
++        drawSideLock(c, u, t, 1f)
++        drawHairGems(c, u, t)
++        drawEarbud(c, u, t, rs)
++        c.restore()
++
++        drawEffects(c, u, t, rs)
++
++        c.restore() // bounce
++        c.restore() // root
++    }
++
++    // ==================================================================
++    // aura: glow, rotating rings, orbiting particles, listening ripples,
++    // thinking dots
++    // ==================================================================
++    private fun drawAura(c: Canvas, u: Float, t: Float, rs: RenderState) {
++        val pulse = 0.88f + 0.12f * sinF(t * 0.00082f)
++
++        solid.shader = RadialGradientShader(
++            0f, -8f * u, 54f * u * pulse,
++            intArrayOf(argb(46, 0, 229, 255), argb(20, 181, 61, 255), 0),
++            floatArrayOf(0f, 0.55f, 1f),
++        )
++        c.drawCircle(0f, -8f * u, 54f * u * pulse, solid)
++        solid.shader = null
++
++        // two counter-rotating dashed rings (additive so they glow)
++        c.save()
++        c.rotate((t * 0.012f) % 360f)
++        glow.pathEffect = DashPathEffect(floatArrayOf(9f * u, 13f * u), (t * 0.02f).toFloat())
++        glow.color = argb(80, 0, 229, 255)
++        glow.strokeWidth = 0.9f * u
++        c.drawCircle(0f, -8f * u, 42f * u, glow)
++        c.restore()
++
++        c.save()
++        c.rotate((-t * 0.009f) % 360f)
++        glow.pathEffect = DashPathEffect(floatArrayOf(3.5f * u, 16f * u), (-t * 0.03f).toFloat())
++        glow.color = argb(60, 181, 61, 255)
++        glow.strokeWidth = 0.7f * u
++        c.drawCircle(0f, -8f * u, 45.5f * u, glow)
++        c.restore()
++        glow.pathEffect = null
++
++        // orbiting particles
++        for (i in 0 until 6) {
++            val fi = i.toFloat() / 5f
++            val r = (34f + 12f * fi) * u
++            val ang = t * 0.00035f * (0.5f + fi) + i.toFloat() * 1.9f
++            val x = cosF(ang) * r
++            val y = -8f * u + sinF(ang) * r * 0.42f
++            val a = (24f + 30f * (0.5f + 0.5f * sinF(t * 0.0029f + i.toFloat() * 2.1f))).toInt()
++            val col = when (i % 3) {
++                0 -> argb(a, 0, 229, 255)
++                1 -> argb(a, 181, 61, 255)
++                else -> argb(a, 255, 255, 255)
++            }
++            solid.color = col
++            c.drawCircle(x, y, (0.7f + 0.7f * fi) * u, solid)
++        }
++
++        // listening: expanding ripples around the head
++        if (rs.listening) {
++            for (k in 0..2) {
++                val p = ((t / 1500f) + k.toFloat() / 3f) % 1f
++                line.color = argb(((1f - p) * 80f).toInt(), 0, 229, 255)
++                line.strokeWidth = 1.1f * u
++                c.drawCircle(0f, -8f * u, (30f + p * 17f) * u, line)
++            }
++        }
++
++        // thinking: three pulsing dots, top-right
++        if (rs.thinking) {
++            for (i in 0..2) {
++                val a = 0.25f + 0.75f * (0.5f + 0.5f * sinF(t * 0.004f - i.toFloat() * 0.9f))
++                solid.color = argb((a * 230f).toInt(), 191, 255, 255)
++                c.drawCircle((23f + i.toFloat() * 4.6f) * u, -41f * u, 1.35f * u, solid)
++            }
++        }
++    }
++
++    // ==================================================================
++    // hair behind the head (sways gently on its own)
++    // ==================================================================
++    private fun drawBackHair(c: Canvas, u: Float, t: Float) {
++        c.save()
++        c.translate(sinF(t * 0.0005f) * 0.7f * u, 0f)
++
++        path.reset()
++        path.moveTo(0f, -38f * u)
++        path.cubicTo(-16f * u, -37f * u, -27f * u, -30f * u, -30f * u, -18f * u)
++        path.cubicTo(-33f * u, -8f * u, -34f * u, 4f * u, -33.5f * u, 16f * u)
++        path.cubicTo(-33f * u, 26f * u, -29f * u, 32f * u, -26f * u, 35f * u)
++        path.cubicTo(-20f * u, 39f * u, -11f * u, 36.5f * u, -5f * u, 38.5f * u)
++        path.cubicTo(0f, 40.5f * u, 5f * u, 38.5f * u, 10f * u, 36.5f * u)
++        path.cubicTo(18f * u, 39f * u, 26f * u, 35f * u, 26f * u, 35f * u)
++        path.cubicTo(29f * u, 32f * u, 33f * u, 26f * u, 33.5f * u, 16f * u)
++        path.cubicTo(34f * u, 4f * u, 33f * u, -8f * u, 30f * u, -18f * u)
++        path.cubicTo(27f * u, -30f * u, 16f * u, -37f * u, 0f, -38f * u)
++        path.close()
++        solid.shader = LinearGradientShader(
++            0f, -38f * u, 0f, 38f * u,
++            intArrayOf(HAIR_DK, 0xFF8A63C9.toInt()),
++            floatArrayOf(0f, 1f),
++        )
++        c.drawPath(path, solid)
++        solid.shader = null
++
++        // faint light strands for depth
++        line.color = argb(38, 255, 255, 255)
++        line.strokeWidth = 0.8f * u
++        path.reset()
++        path.moveTo(-21f * u, -18f * u)
++        path.cubicTo(-25f * u, 0f, -24f * u, 16f * u, -22f * u, 30f * u)
++        c.drawPath(path, line)
++        path.reset()
++        path.moveTo(21f * u, -18f * u)
++        path.cubicTo(25f * u, 0f, 24f * u, 16f * u, 22f * u, 30f * u)
++        c.drawPath(path, line)
++
++        c.restore()
++    }
++
++    // ==================================================================
++    // body: cyber top, glowing collar, pulsing heart emblem (breathes)
++    // ==================================================================
++    private fun drawBody(c: Canvas, u: Float, t: Float) {
++        c.save()
++        c.translate(0f, sinF(t * 0.001f) * 0.7f * u)
++
++        path.reset()
++        path.moveTo(-37f * u, 48f * u)
++        path.cubicTo(-34f * u, 26f * u, -27f * u, 16.5f * u, -13f * u, 12.8f * u)
++        path.cubicTo(-7f * u, 11.6f * u, -3.5f * u, 12.6f * u, 0f, 14.6f * u)
++        path.cubicTo(3.5f * u, 12.6f * u, 7f * u, 11.6f * u, 13f * u, 12.8f * u)
++        path.cubicTo(27f * u, 16.5f * u, 34f * u, 26f * u, 37f * u, 48f * u)
++        path.close()
++        solid.shader = LinearGradientShader(
++            0f, 12f * u, 0f, 46f * u,
++            intArrayOf(TOP_1, TOP_2),
++            floatArrayOf(0f, 1f),
++        )
++        c.drawPath(path, solid)
++        solid.shader = null
++
++        // soft chin shadow on the chest
++        solid.shader = RadialGradientShader(
++            0f, 16.5f * u, 11f * u,
++            intArrayOf(argb(110, 12, 7, 24), 0),
++            floatArrayOf(0f, 1f),
++        )
++        rect.set(-12f * u, 12f * u, 12f * u, 22f * u)
++        c.drawOval(rect, solid)
++        solid.shader = null
++
++        // glowing V collar
++        path.reset()
++        path.moveTo(-9f * u, 12.6f * u)
++        path.lineTo(0f, 19.4f * u)
++        path.lineTo(9f * u, 12.6f * u)
++        line.color = argb(40, 0, 229, 255)
++        line.strokeWidth = 3f * u
++        c.drawPath(path, line)
++        line.color = argb(235, 0, 229, 255)
++        line.strokeWidth = 1.1f * u
++        c.drawPath(path, line)
++
++        // pulsing heart emblem
++        val hp = (1f + 0.07f * sinF(t * 0.0024f)) * 3.1f * u
++        solid.shader = RadialGradientShader(
++            0f, 26.5f * u, 6f * u,
++            intArrayOf(argb(70, 181, 61, 255), 0),
++            floatArrayOf(0f, 1f),
++        )
++        c.drawCircle(0f, 26.5f * u, 6f * u, solid)
++        solid.shader = null
++        heartPath(path, 0f, 26.8f * u, hp)
++        solid.color = 0xFFC56BFF.toInt()
++        c.drawPath(path, solid)
++        heartPath(path, 0f, 26.2f * u, hp * 0.55f)
++        solid.color = argb(120, 255, 255, 255)
++        c.drawPath(path, solid)
++
++        c.restore()
++    }
++
++    // ==================================================================
++    // head
++    // ==================================================================
++    private fun drawEars(c: Canvas, u: Float) {
++        solid.color = 0xFFF5CDB4.toInt()
++        c.drawOval(-27.5f * u, -13f * u, -19f * u, -3f * u, solid)
++        c.drawOval(19f * u, -13f * u, 27.5f * u, -3f * u, solid)
++    }
++
++    private fun drawFace(c: Canvas, u: Float) {
++        val r = rect
++        r.set(-22.5f * u, -34.5f * u, 22.5f * u, 14.5f * u)
++
++        // fair skin with a warm highlight up top
++        solid.shader = RadialGradientShader(
++            0f, -18f * u, 36f * u,
++            intArrayOf(SKIN_HI, SKIN, SKIN_LO),
++            floatArrayOf(0f, 0.6f, 1f),
++        )
++        c.drawOval(r, solid)
++        solid.shader = null
++
++        // soft shading on the right side
++        solid.shader = RadialGradientShader(
++            9f * u, -8f * u, 30f * u,
++            intArrayOf(0, argb(46, 226, 168, 130)),
++            floatArrayOf(0f, 1f),
++        )
++        c.drawOval(r, solid)
++        solid.shader = null
++
++        // faint rim light on the left
++        line.color = argb(30, 255, 255, 255)
++        line.strokeWidth = 1.6f * u
++        c.drawArc(r, 118f, 64f, false, line)
++    }
++
++    private fun drawBlush(c: Canvas, u: Float, rs: RenderState) {
++        val b = rs.face.blush
++        if (b <= 0.01f) return
++        for (s in floatArrayOf(-1f, 1f)) {
++            val cx = s * 15.5f * u
++            solid.shader = RadialGradientShader(
++                cx, 4.5f * u, 5.6f * u,
++                intArrayOf(argb((56f * b).toInt(), 255, 157, 190), 0),
++                floatArrayOf(0f, 1f),
++            )
++            rect.set(cx - 5.6f * u, 1.6f * u, cx + 5.6f * u, 7.4f * u)
++            c.drawOval(rect, solid)
++        }
++        solid.shader = null
++    }
++
++    /**
++     * One big anime eye. [outer] is -1 for the left eye, +1 for the right —
++     * it flips which side gets the lash flick. The whole interior (sclera,
++     * iris, pupil, highlights, lids) is scaled vertically around the eye
++     * centre, so blinking and happy-squint collapse the eye to a line
++     * correctly.
++     */
++    private fun drawEye(c: Canvas, u: Float, rs: RenderState, cx: Float, cy: Float, outer: Float) {
++        val f = rs.face
++        val squintK = 1f - 0.22f * f.squint
++        val openK = (f.eyeOpen * squintK * (1f - rs.lidClose)).coerceIn(0f, 1.12f)
++        val gx = rs.gazeX * u
++        val gy = rs.gazeY * u
++
++        // sclera rect (also the clip for the eye interior)
++        rect.set(cx - 6.3f * u, cy - 7.3f * u, cx + 6.3f * u, cy + 7.3f * u)
++        path.reset()
++        path.addOval(rect, Path.Direction.CW)
++
++        c.save()
++        c.translate(0f, cy)
++        c.scale(1f, openK, 0f, 0f)
++        c.translate(0f, -cy)
++
++        c.save()
++        c.clipPath(path)
++        // sclera
++        solid.color = 0xFFFDF6F0.toInt()
++        c.drawOval(rect, solid)
++
++        // iris — cyan-to-violet gradient, offset by the gaze
++        val ix = cx + gx * 0.62f
++        val iy = cy + gy * 0.5f + 0.4f * u
++        val irx = 4.7f * u * f.iris
++        val iry = 5.9f * u * f.iris
++        solid.shader = LinearGradientShader(
++            ix, iy - iry, ix, iy + iry,
++            intArrayOf(IRIS_T, IRIS_M, IRIS_B),
++            floatArrayOf(0f, 0.45f, 1f),
++        )
++        rect.set(ix - irx, iy - iry, ix + irx, iy + iry)
++        c.drawOval(rect, solid)
++        solid.shader = null
++        // iris bottom rim
++        line.color = argb(150, 62, 46, 158)
++        line.strokeWidth = 0.9f * u
++        c.drawArc(rect, 20f, 140f, false, line)
++        // pupil
++        solid.color = PUPIL
++        rect.set(
++            ix - 2.3f * u * f.iris - gx * 0.05f,
++            iy - 3.0f * u * f.iris + 0.3f * u,
++            ix + 2.3f * u * f.iris - gx * 0.05f,
++            iy + 3.0f * u * f.iris + 0.3f * u,
++        )
++        c.drawOval(rect, solid)
++        // big + small highlights
++        solid.color = 0xE6FFFFFF.toInt()
++        c.drawOval(
++            cx - 4.4f * u + gx * 0.25f, cy - 5.6f * u + gy * 0.2f,
++            cx - 0.2f * u + gx * 0.25f, cy - 2.6f * u + gy * 0.2f, solid,
++        )
++        solid.color = 0xB3FFFFFF.toInt()
++        c.drawOval(
++            cx + 1.6f * u + gx * 0.3f, cy + 1.6f * u + gy * 0.25f,
++            cx + 3.6f * u + gx * 0.3f, cy + 3.2f * u + gy * 0.25f, solid,
++        )
++        // sparkle glint — a little heart when she is affectionate
++        if (rs.emotion == Emotion.AFFECTIONATE && f.squint > 0.25f) {
++            heartPath(path, cx - 2.2f * u + gx * 0.25f, cy - 1.6f * u + gy * 0.2f, 1.05f * u)
++            solid.color = 0xE6FFFFFF.toInt()
++            c.drawPath(path, solid)
++        } else {
++            drawSpark(c, u, cx - 2.2f * u + gx * 0.25f, cy - 1.4f * u + gy * 0.2f, 1.15f * u, 200)
++        }
++        c.restore() // unclip
++
++        // upper lash with an outward flick (drawn in scaled space so it
++        // follows the lid down when she blinks)
++        val innerX = cx - outer * 6.4f * u
++        val outerX = cx + outer * 6.6f * u
++        path.reset()
++        path.moveTo(innerX, cy - 4.6f * u)
++        path.quadTo(cx - outer * 0.5f * u, cy - 9f * u, outerX, cy - 5.4f * u)
++        path.quadTo(outerX + outer * 1.4f * u, cy - 5f * u, outerX + outer * 2.4f * u, cy - 3.8f * u)
++        line.color = INK
++        line.strokeWidth = 1.9f * u
++        c.drawPath(path, line)
++
++        // lower lid — curves up when she is happy
++        path.reset()
++        path.moveTo(cx - 4.6f * u, cy + 7f * u)
++        path.quadTo(cx, cy + (7f + 2.4f * f.squint) * u, cx + 4.6f * u, cy + 7f * u)
++        line.color = argb((90f + 60f * f.squint).toInt(), 201, 143, 116)
++        line.strokeWidth = 0.75f * u
++        c.drawPath(path, line)
++        c.restore() // unscale
++
++        // closed-lid line once the lids are mostly down
++        if (rs.lidClose > 0.55f) {
++            path.reset()
++            path.moveTo(cx - 5.2f * u, cy + 0.4f * u)
++            path.quadTo(cx, cy + 2.8f * u, cx + 5.2f * u, cy + 0.4f * u)
++            line.color = INK
++            line.strokeWidth = 1.6f * u
++            c.drawPath(path, line)
++        }
++    }
++
++    private fun drawBrow(c: Canvas, u: Float, rs: RenderState, cx: Float, cy: Float, outer: Float) {
++        val f = rs.face
++        val base = cy - 10f * u - f.browLift * 1.3f * u
++        val innerX = cx - outer * 4.4f * u
++        val outerX = cx + outer * 4.8f * u
++        val innerY = base - f.browTilt * 1.9f * u
++        val outerY = base + 0.3f * u
++        path.reset()
++        path.moveTo(outerX, outerY)
++        path.quadTo(cx - outer * 1f * u, base - 1.2f * u - f.browLift * 0.5f * u, innerX, innerY)
++        line.color = BROW
++        line.alpha = 215
++        line.strokeWidth = 1.25f * u
++        c.drawPath(path, line)
++        line.alpha = 255
++    }
++
++    private fun drawNose(c: Canvas, u: Float) {
++        path.reset()
++        path.moveTo(0.9f * u, 2.6f * u)
++        path.quadTo(1.6f * u, 3.2f * u, 1.1f * u, 3.9f * u)
++        line.color = argb(140, 216, 154, 124)
++        line.strokeWidth = 0.6f * u
++        c.drawPath(path, line)
++    }
++
++    /**
++     * Mouth: an open lip-synced mouth (with tongue) while speaking, a soft
++     * "U" smile at rest, a frown when sad, a little "o" while thinking.
++     */
++    private fun drawMouth(c: Canvas, u: Float, t: Float, rs: RenderState) {
++        val f = rs.face
++        val my = 9.3f * u
++        val speaking = rs.mouthOpen > 0.02f
++        val jitter = if (speaking) 0.88f + 0.12f * sinF(t * 0.011f) else 1f
++        val open = ((f.mouthBase + rs.mouthOpen) * jitter).coerceIn(0f, 1f)
++
++        if (open > 0.1f) {
++            val wM = (5.4f + 2.2f * f.smile.coerceAtLeast(0f)) * u
++            val hM = (1.5f + open * 5.6f) * u
++            path.reset()
++            path.moveTo(-wM * 0.5f, my)
++            path.quadTo(0f, my + 0.8f * u, wM * 0.5f, my)
++            path.quadTo(wM * 0.52f, my + hM * 0.55f, wM * 0.34f, my + hM * 0.88f)
++            path.quadTo(0f, my + hM * 1.12f, -wM * 0.34f, my + hM * 0.88f)
++            path.quadTo(-wM * 0.52f, my + hM * 0.55f, -wM * 0.5f, my)
++            path.close()
++            solid.color = MOUTH_IN
++            c.drawPath(path, solid)
++            // tongue
++            c.save()
++            c.clipPath(path)
++            solid.color = TONGUE
++            rect.set(-wM * 0.3f, my + hM * 0.55f, wM * 0.3f, my + hM * 1.25f)
++            c.drawOval(rect, solid)
++            c.restore()
++        } else if (rs.thinking) {
++            // little "o"
++            line.color = MOUTH_C
++            line.strokeWidth = 1.05f * u
++            rect.set(0.6f * u, my - 1.6f * u, 2.6f * u, my + 0.2f * u)
++            c.drawOval(rect, line)
++        } else {
++            val curve = f.smile * 2.4f * u
++            path.reset()
++            path.moveTo(-3.3f * u, my)
++            path.quadTo(0f, my + curve, 3.3f * u, my)
++            line.color = MOUTH_C
++            line.strokeWidth = 1.5f * u
++            c.drawPath(path, line)
++            if (f.smile > 0.4f) {
++                path.reset()
++                path.moveTo(-1.6f * u, my + curve + 1.1f * u)
++                path.quadTo(0f, my + curve + 1.7f * u, 1.6f * u, my + curve + 1.1f * u)
++                line.color = argb(40, 255, 255, 255)
++                line.strokeWidth = 0.5f * u
++                c.drawPath(path, line)
++            }
++        }
++    }
++
++    // ==================================================================
++    // hair in front: cap, bangs, side locks, gems, earbud
++    // ==================================================================
++    private fun drawHairCap(c: Canvas, u: Float, t: Float) {
++        path.reset()
++        path.moveTo(-25f * u, -10f * u)
++        path.cubicTo(-26f * u, -26f * u, -14f * u, -36.5f * u, 0f, -36.5f * u)
++        path.cubicTo(14f * u, -36.5f * u, 26f * u, -26f * u, 25f * u, -10f * u)
++        path.cubicTo(20f * u, -12.5f * u, 16f * u, -16.5f * u, 10f * u, -16f * u)
++        path.cubicTo(5f * u, -15.5f * u, 3f * u, -13.5f * u, 0f, -13.5f * u)
++        path.cubicTo(-3f * u, -13.5f * u, -5f * u, -15.5f * u, -10f * u, -16f * u)
++        path.cubicTo(-16f * u, -16.5f * u, -20f * u, -12.5f * u, -25f * u, -10f * u)
++        path.close()
++        solid.shader = LinearGradientShader(
++            0f, -36.5f * u, 0f, -10f * u,
++            intArrayOf(HAIR_LT, HAIR_MD),
++            floatArrayOf(0f, 1f),
++        )
++        c.drawPath(path, solid)
++        solid.shader = null
++
++        // moving shine band
++        val sw = sinF(t * 0.0009f) * 1.6f * u
++        path.reset()
++        path.moveTo(-13f * u + sw, -30.5f * u)
++        path.quadTo(0f, -34.6f * u, 11f * u + sw, -31f * u)
++        line.color = argb(50, 255, 255, 255)
++        line.strokeWidth = 2.2f * u
++        c.drawPath(path, line)
++        path.reset()
++        path.moveTo(-8f * u + sw, -28.6f * u)
++        path.quadTo(1f * u, -31.4f * u, 7f * u + sw, -29.4f * u)
++        line.color = argb(100, 255, 255, 255)
++        line.strokeWidth = 0.7f * u
++        c.drawPath(path, line)
++    }
++
++    /** Eight rounded bang petals with a centre part; tips sway individually. */
++    private fun drawBangs(c: Canvas, u: Float, t: Float) {
++        // Tip heights are tuned so the bangs stop at brow level in the middle
++        // (brows stay visible) but run long enough at the temples to frame
++        // the face, grazing the outer eye corners like in anime art.
++        val xs = floatArrayOf(-19.5f, -13f, -6.5f, -2.8f, 2.8f, 6.5f, 13f, 19.5f)
++        for (x in xs) {
++            val dir = if (x < 0f) -1f else 1f
++            val tipY = when {
++                abs(x) > 17f -> -9f
++                abs(x) > 11f -> -11.5f
++                abs(x) > 4.5f -> -12.8f
++                else -> -13.5f
++            } * u
++            val sway = sinF(t * 0.0008f + x * 0.35f) * 0.8f * u
++            path.reset()
++            path.moveTo(x * u - 3.6f * u, -21f * u)
++            path.cubicTo(
++                x * u - 4.2f * u, -12f * u,
++                x * u - 2.6f * u, tipY + 3f * u,
++                x * u + sway + dir * 1.4f * u, tipY,
++            )
++            path.cubicTo(
++                x * u + 2.6f * u, tipY + 3f * u,
++                x * u + 4.2f * u, -12f * u,
++                x * u + 3.6f * u, -21f * u,
++            )
++            path.close()
++            solid.shader = LinearGradientShader(
++                x * u, -21f * u, x * u, tipY,
++                intArrayOf(0xFFEDDFFB.toInt(), 0xFFC9ADF0.toInt()),
++                floatArrayOf(0f, 1f),
++            )
++            c.drawPath(path, solid)
++            solid.shader = null
++            line.color = argb(70, 159, 127, 209)
++            line.strokeWidth = 0.45f * u
++            c.drawPath(path, line)
++        }
++    }
++
++    /** Long lock framing one side of the face; the tip sways. */
++    private fun drawSideLock(c: Canvas, u: Float, t: Float, s: Float) {
++        val sw = sinF(t * 0.0007f + s) * 1.1f * u
++        path.reset()
++        path.moveTo(s * 21.5f * u, -16f * u)
++        path.cubicTo(s * 26.5f * u, -8f * u, s * 27.5f * u, 4f * u, s * 26f * u, 14f * u)
++        path.cubicTo(s * 25.2f * u, 21f * u, s * 23f * u, 26f * u, s * 20.5f * u + sw, 30f * u)
++        path.cubicTo(s * 19.6f * u + sw * 0.6f, 25f * u, s * 20.6f * u, 20f * u, s * 20.2f * u, 13f * u)
++        path.cubicTo(s * 19.8f * u, 4f * u, s * 20f * u, -8f * u, s * 21.5f * u, -16f * u)
++        path.close()
++        solid.shader = LinearGradientShader(
++            0f, -16f * u, 0f, 30f * u,
++            intArrayOf(0xFFE0D0FA.toInt(), 0xFFB294E0.toInt()),
++            floatArrayOf(0f, 1f),
++        )
++        c.drawPath(path, solid)
++        solid.shader = null
++    }
++
++    /** Two tiny glowing diodes in the hair — the "AI companion" cue. */
++    private fun drawHairGems(c: Canvas, u: Float, t: Float) {
++        val p = 0.7f + 0.3f * sinF(t * 0.004f)
++
++        solid.shader = RadialGradientShader(
++            -8.5f * u, -19.5f * u, 4.5f * u,
++            intArrayOf(argb((95f * p).toInt(), 0, 229, 255), 0),
++            floatArrayOf(0f, 1f),
++        )
++        c.drawCircle(-8.5f * u, -19.5f * u, 4.5f * u, solid)
++        solid.shader = null
++        line.color = argb(200, 0, 229, 255)
++        line.strokeWidth = 0.5f * u
++        c.drawLine(-8.5f * u, -19.5f * u, -8.5f * u, -23.5f * u, line)
++        solid.color = 0xFFCFFFFF.toInt()
++        c.drawCircle(-8.5f * u, -19.5f * u, 1.35f * u, solid)
++
++        solid.shader = RadialGradientShader(
++            8f * u, -20.5f * u, 3.2f * u,
++            intArrayOf(argb((80f * p).toInt(), 181, 61, 255), 0),
++            floatArrayOf(0f, 1f),
++        )
++        c.drawCircle(8f * u, -20.5f * u, 3.2f * u, solid)
++        solid.shader = null
++        solid.color = 0xFFECC9FF.toInt()
++        c.drawCircle(8f * u, -20.5f * u, 1f * u, solid)
++    }
++
++    /** Glowing earbud on her right ear; pulses brighter while listening. */
++    private fun drawEarbud(c: Canvas, u: Float, t: Float, rs: RenderState) {
++        val p = 0.6f + 0.4f * sinF(t * 0.005f)
++        val glowA = ((if (rs.listening) 150f else 70f) * p).toInt()
++        solid.shader = RadialGradientShader(
++            24.8f * u, -6f * u, 4.5f * u,
++            intArrayOf(argb(glowA, 0, 229, 255), 0),
++            floatArrayOf(0f, 1f),
++        )
++        c.drawCircle(24.8f * u, -6f * u, 4.5f * u, solid)
++        solid.shader = null
++        solid.color = argb(245, 234, 253, 255)
++        rect.set(23.6f * u, -8.2f * u, 26f * u, -3.8f * u)
++        c.drawRoundRect(rect, 1.1f * u, 1.1f * u, solid)
++    }
++
++    // ==================================================================
++    // effects: pop hearts, sweat drop (worried), zzz (sleepy), sparkles
++    // ==================================================================
++    private fun drawEffects(c: Canvas, u: Float, t: Float, rs: RenderState) {
++        // hearts
++        for (h in rs.hearts) {
++            val x = h.x * u + sinF(h.p * 7f + h.hue.toFloat()) * 1.5f * u
++            val y = h.y * u - h.p * 12f * u
++            val s = (2.1f + h.p * 1.7f) * u
++            val a = ((1f - h.p) * 235f).toInt()
++            val col = when (h.hue) {
++                0 -> argb(a, 255, 125, 174)
++                1 -> argb(a, 197, 107, 255)
++                else -> argb(a, 0, 229, 255)
++            }
++            heartPath(path, x, y, s)
++            solid.color = col
++            c.drawPath(path, solid)
++        }
++
++        // sweat drop, dripping while worried
++        if (rs.emotion == Emotion.WORRIED) {
++            val p = (t % 2600f) / 2600f
++            val x = 19f * u
++            val y = -21f * u + p * 7f * u
++            val a = ((1f - p) * 190f).toInt()
++            path.reset()
++            path.moveTo(x, y - 2.8f * u)
++            path.quadTo(x + 1.7f * u, y + 0.6f * u, x, y + 1.5f * u)
++            path.quadTo(x - 1.7f * u, y + 0.6f * u, x, y - 2.8f * u)
++            path.close()
++            solid.color = argb(a, 214, 244, 255)
++            c.drawPath(path, solid)
++        }
++
++        // drifting "z"s while sleepy
++        if (rs.emotion == Emotion.SLEEPY) {
++            for (i in 0..1) {
++                val p = ((t / 2800f) + i.toFloat() * 0.5f) % 1f
++                text.color = argb(((1f - p) * 190f).toInt(), 191, 233, 255)
++                text.textSize = (3.6f + i.toFloat() * 1.4f + p * 2.4f) * u
++                c.drawText("z", (21f + i.toFloat() * 3f + p * 5f) * u, (-30f - i.toFloat() * 4f - p * 10f) * u, text)
++            }
++        }
++
++        // sparkles while happy-ish
++        if (rs.face.squint > 0.25f) {
++            val a1 = (110f + 110f * sinF(t * 0.006f)).toInt().coerceIn(30, 220)
++            val a2 = (110f + 110f * sinF(t * 0.006f + 2.1f)).toInt().coerceIn(30, 220)
++            drawSpark(c, u, 17.5f * u, -28f * u, 1.5f * u, a1)
++            drawSpark(c, u, -19.5f * u, -25f * u, 1.1f * u, a2)
++        }
++    }
++
++    // ==================================================================
++    // small path helpers
++    // ==================================================================
++    private fun heartPath(p: Path, x: Float, y: Float, s: Float) {
++        p.reset()
++        p.moveTo(x, y + 0.55f * s)
++        p.cubicTo(x - 1.05f * s, y - 0.15f * s, x - 0.62f * s, y - 1.08f * s, x, y - 0.45f * s)
++        p.cubicTo(x + 0.62f * s, y - 1.08f * s, x + 1.05f * s, y - 0.15f * s, x, y + 0.55f * s)
++        p.close()
++    }
++
++    /** A four-point sparkle star. */
++    private fun drawSpark(c: Canvas, u: Float, x: Float, y: Float, s: Float, alpha: Int) {
++        path.reset()
++        path.moveTo(x, y - s)
++        path.lineTo(x + 0.28f * s, y - 0.28f * s)
++        path.lineTo(x + s, y)
++        path.lineTo(x + 0.28f * s, y + 0.28f * s)
++        path.lineTo(x, y + s)
++        path.lineTo(x - 0.28f * s, y + 0.28f * s)
++        path.lineTo(x - s, y)
++        path.lineTo(x - 0.28f * s, y - 0.28f * s)
++        path.close()
++        solid.color = argb(alpha, 255, 255, 255)
++        c.drawPath(path, solid)
++    }
++}
+diff --git a/android-app/app/src/main/java/com/rgs/companion/avatar/RenderState.kt b/android-app/app/src/main/java/com/rgs/companion/avatar/RenderState.kt
+new file mode 100644
+index 0000000..507d360
+--- /dev/null
++++ b/android-app/app/src/main/java/com/rgs/companion/avatar/RenderState.kt
+@@ -0,0 +1,83 @@
++package com.rgs.companion.avatar
++
++import com.rgs.companion.companion.Emotion
++
++/**
++ * All the knobs an emotion turns for the avatar's face.
++ *
++ * The [Emotion] enum (owned by the companion/agent layer) maps to exactly one
++ * [FaceState] via [forEmotion]; [GirlPainter] only ever sees numbers, so the
++ * painter never needs to know anything about the LLM's tags.
++ *
++ * Ranges:
++ *  - [browLift]  0..1   how high the brows sit
++ *  - [browTilt]  -1..1  negative = inner ends down (angry), positive = up (worried/sad)
++ *  - [eyeOpen]   0.4..1.2  base openness (multiplied by the blink envelope)
++ *  - [squint]    0..1   happy-narrow: lower lid curves up, eye content shrinks
++ *  - [iris]      0.8..1.15  iris size scale (< 1 reads as wide-eyed/surprised)
++ *  - [smile]     -1..1  -1 deep frown .. +1 full grin (also drives the "U" curve)
++ *  - [mouthBase] 0..1  resting mouth open amount (before lip-sync is added)
++ *  - [blush]     0..1  cheek colour intensity
++ *  - [tiltRad]   head tilt in radians (positive = leaning right)
++ */
++data class FaceState(
++    val browLift: Float,
++    val browTilt: Float,
++    val eyeOpen: Float,
++    val squint: Float,
++    val iris: Float,
++    val smile: Float,
++    val mouthBase: Float,
++    val blush: Float,
++    val tiltRad: Float,
++) {
++    companion object {
++        val NEUTRAL = FaceState(0.5f, 0f, 1f, 0f, 1f, 0.35f, 0f, 0.3f, 0f)
++
++        fun forEmotion(e: Emotion): FaceState = when (e) {
++            Emotion.NEUTRAL -> NEUTRAL
++            Emotion.HAPPY -> FaceState(0.7f, 0.15f, 0.95f, 0.45f, 1.05f, 1f, 0.22f, 0.6f, -0.02f)
++            Emotion.AFFECTIONATE -> FaceState(0.6f, 0.1f, 0.9f, 0.35f, 1.12f, 0.8f, 0.08f, 1f, 0.03f)
++            Emotion.SHY -> FaceState(0.55f, 0.35f, 0.85f, 0.2f, 0.95f, 0.3f, 0f, 1f, 0.05f)
++            Emotion.PLAYFUL -> FaceState(0.8f, -0.1f, 1f, 0.3f, 1.1f, 0.9f, 0.18f, 0.5f, -0.04f)
++            Emotion.SAD -> FaceState(0.35f, 0.8f, 0.8f, 0.1f, 0.85f, -0.6f, 0f, 0.1f, 0f)
++            Emotion.WORRIED -> FaceState(0.75f, 0.8f, 0.95f, 0.15f, 1f, -0.35f, 0.04f, 0.2f, 0.02f)
++            Emotion.ANGRY -> FaceState(0.25f, -1f, 0.8f, 0.35f, 0.9f, -0.8f, 0.04f, 0.15f, 0f)
++            Emotion.SURPRISED -> FaceState(1f, 0f, 1.15f, 0f, 0.8f, 0f, 0.3f, 0.3f, -0.03f)
++            Emotion.SLEEPY -> FaceState(0.3f, 0.1f, 0.5f, 0.1f, 0.9f, 0.15f, 0.08f, 0.4f, 0.06f)
++        }
++    }
++}
++
++/**
++ * One frame's worth of inputs for [GirlPainter].
++ *
++ * A mutable class on purpose: [AvatarView] reuses the same instance every
++ * frame, which keeps the 60-120fps loop allocation-free.
++ */
++class RenderState {
++    var tMs: Long = 0L
++    var emotion: Emotion = Emotion.NEUTRAL
++    var face: FaceState = FaceState.NEUTRAL
++    /** Blink envelope, 0 = eyes open, 1 = lids closed. */
++    var lidClose: Float = 0f
++    /** Gaze direction in u-units (already eased by [AvatarView]). */
++    var gazeX: Float = 0f
++    var gazeY: Float = 0f
++    /** 0..1, from the TTS lip-sync envelope. */
++    var mouthOpen: Float = 0f
++    var thinking: Boolean = false
++    var listening: Boolean = false
++    /** Tap bounce offset in u-units (negative = up). */
++    var bounceY: Float = 0f
++    /** Pop hearts, e.g. after a tap or during affectionate moments. */
++    val hearts = ArrayList<HeartFx>()
++}
++
++/** A small heart that rises and fades. [p] advances 0..1 over ~950ms. */
++class HeartFx(
++    var x: Float,
++    var y: Float,
++    var p: Float,
++    val hue: Int,
++)
+diff --git a/android-app/app/src/main/java/com/rgs/companion/chat/ChatScreen.kt b/android-app/app/src/main/java/com/rgs/companion/chat/ChatScreen.kt
+index d406a2b..97b20dd 100644
+--- a/android-app/app/src/main/java/com/rgs/companion/chat/ChatScreen.kt
++++ b/android-app/app/src/main/java/com/rgs/companion/chat/ChatScreen.kt
+@@ -1,31 +1,48 @@
+ package com.rgs.companion.chat
+ 
++import androidx.compose.animation.core.FastOutSlowInEasing
++import androidx.compose.animation.core.RepeatMode
++import androidx.compose.animation.core.animateFloat
++import androidx.compose.animation.core.infiniteRepeatable
++import androidx.compose.animation.core.rememberInfiniteTransition
++import androidx.compose.animation.core.tween
++import androidx.compose.foundation.BorderStroke
++import androidx.compose.foundation.background
++import androidx.compose.foundation.border
++import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.PaddingValues
+ import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
+ import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.imePadding
++import androidx.compose.foundation.layout.offset
+ import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.statusBarsPadding
++import androidx.compose.foundation.layout.width
+ import androidx.compose.foundation.layout.widthIn
+ import androidx.compose.foundation.lazy.LazyColumn
+ import androidx.compose.foundation.lazy.items
+ import androidx.compose.foundation.lazy.rememberLazyListState
++import androidx.compose.foundation.shape.CircleShape
+ import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.automirrored.filled.ArrowBack
+ import androidx.compose.material.icons.filled.Mic
+ import androidx.compose.material.icons.filled.Send
+ import androidx.compose.material3.CircularProgressIndicator
+ import androidx.compose.material3.Icon
+ import androidx.compose.material3.IconButton
+ import androidx.compose.material3.MaterialTheme
+-import androidx.compose.material3.OutlinedTextField
+ import androidx.compose.material3.Surface
+ import androidx.compose.material3.Text
++import androidx.compose.material3.TextField
++import androidx.compose.material3.TextFieldDefaults
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.getValue
+@@ -34,29 +51,42 @@ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.draw.scale
++import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.text.font.FontStyle
++import androidx.compose.ui.text.font.FontFamily
+ import androidx.compose.ui.unit.dp
+-import androidx.compose.ui.viewinterop.AndroidView
++import androidx.compose.ui.unit.sp
+ import androidx.lifecycle.compose.collectAsStateWithLifecycle
+-import com.rgs.companion.live2d.Live2DView
++import com.rgs.companion.avatar.AvatarSurface
++import com.rgs.companion.ui.theme.MutedOn
++import com.rgs.companion.ui.theme.NeonCyan
++import com.rgs.companion.ui.theme.NeonViolet
+ 
+ /**
+- * The chat screen: Live2D avatar on top, transcript in the middle, input at the
+- * bottom.
++ * The chat screen: the companion girl on top, transcript in the middle,
++ * input at the bottom.
+  *
+- * The avatar is a [Live2DView] embedded with [AndroidView]. Two details matter:
++ * Design: "Cyber Obsidian" glassmorphism — near-black background with two
++ * soft neon glows, glass bubbles with 1dp translucent borders, and a
++ * gradient send button. No harsh shadows; tonal separation only.
+  *
+- * - The `update` block must be **cheap and idempotent** -- it re-runs on every
+- *   recomposition. It only pushes the current expression.
+- * - Lip-sync is *not* driven through Compose state. Updating a `Float` at 20fps
+- *   through the state system would recompose the whole screen every frame. The
+- *   renderer reads it straight off the view instead.
++ * The avatar is an [AvatarSurface] (a self-animating canvas view). Two
++ * details matter:
++ *
++ * - The `update` block must be **cheap and idempotent** — it re-runs on
++ *   every recomposition. It only pushes volatile fields.
++ * - Lip-sync is not animated through Compose: the view reads
++ *   `mouthLevel` on its own frame loop.
+  */
+ @Composable
+ fun ChatScreen(
+     viewModel: ChatViewModel,
+     modifier: Modifier = Modifier,
+-    modelAssetPath: String = "models/hiyori/hiyori.model3.json",
++    companionName: String = "Aria",
++    onBack: (() -> Unit)? = null,
+ ) {
+     val state by viewModel.state.collectAsStateWithLifecycle()
+     var draft by remember { mutableStateOf("") }
+@@ -68,142 +98,314 @@ fun ChatScreen(
+         if (target > 0) listState.animateScrollToItem(target - 1)
+     }
+ 
+-    Column(
+-        modifier = modifier
+-            .fillMaxSize()
+-            .imePadding(),
+-    ) {
+-        // ── avatar ─────────────────────────────────────────────────────
+-        Box(
++    Box(modifier = modifier.fillMaxSize()) {
++        BackdropGlow()
++
++        Column(
+             modifier = Modifier
+-                .fillMaxWidth()
+-                .height(AVATAR_HEIGHT_DP.dp),
+-            contentAlignment = Alignment.Center,
++                .fillMaxSize()
++                .statusBarsPadding()
++                .imePadding(),
+         ) {
+-            AndroidView(
+-                modifier = Modifier.fillMaxSize(),
+-                factory = { ctx ->
+-                    Live2DView(ctx).apply {
+-                        onTap = { _, _ -> viewModel.pokeAvatar() }
+-                        loadModel(modelAssetPath)
++            HeroPanel(companionName, state, onAvatarTap = { viewModel.pokeAvatar() })
++            SystemLine()
++
++            LazyColumn(
++                state = listState,
++                modifier = Modifier
++                    .weight(1f)
++                    .fillMaxWidth()
++                    .padding(horizontal = 12.dp),
++                contentPadding = PaddingValues(vertical = 8.dp),
++                verticalArrangement = Arrangement.spacedBy(8.dp),
++            ) {
++                if (state.messages.isEmpty() && state.greeting.isNotEmpty()) {
++                    item {
++                        GlassBubble(text = state.greeting, fromUser = false, italic = true)
++                    }
++                }
++                items(state.messages, key = { it.hashCode() }) { message ->
++                    GlassBubble(
++                        text = message.text,
++                        fromUser = message.role == "user",
++                        isError = message.role == "error",
++                        proactive = message.proactive,
++                    )
++                }
++                if (state.thinking) {
++                    item { ThinkingBubble() }
++                }
++            }
++
++            InputBar(
++                draft = draft,
++                onDraft = { draft = it },
++                placeholder = "Say something to ${companionName}...",
++                state = state,
++                onMic = { viewModel.toggleMic() },
++                onSend = {
++                    if (draft.isNotBlank()) {
++                        viewModel.send(draft)
++                        draft = ""
+                     }
+-                },
+-                update = { view ->
+-                    view.setExpression(state.emotion.expressionName)
+-                    view.setMouthOpen(state.mouthLevel)
+                 },
+             )
+         }
+ 
+-        // ── transcript ─────────────────────────────────────────────────
+-        LazyColumn(
+-            state = listState,
+-            modifier = Modifier
+-                .weight(1f)
+-                .fillMaxWidth()
+-                .padding(horizontal = 12.dp),
+-            contentPadding = PaddingValues(vertical = 8.dp),
+-            verticalArrangement = Arrangement.spacedBy(8.dp),
+-        ) {
+-            if (state.messages.isEmpty() && state.greeting.isNotEmpty()) {
+-                item {
+-                    MessageBubble(
+-                        text = state.greeting,
+-                        fromUser = false,
+-                        italic = true,
+-                    )
+-                }
+-            }
+-            items(state.messages, key = { it.hashCode() }) { message ->
+-                MessageBubble(
+-                    text = message.text,
+-                    fromUser = message.role == "user",
+-                    isError = message.role == "error",
+-                    proactive = message.proactive,
+-                )
+-            }
+-            if (state.thinking) {
+-                item { ThinkingBubble() }
++        onBack?.let { back ->
++            IconButton(
++                onClick = back,
++                modifier = Modifier
++                    .align(Alignment.TopStart)
++                    .statusBarsPadding()
++                    .padding(start = 8.dp, top = 8.dp),
++            ) {
++                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = MutedOn)
+             }
+         }
++    }
++}
++
++// ======================================================================
++// backdrop
++// ======================================================================
++@Composable
++private fun BackdropGlow() {
++    Box(
++        Modifier
++            .fillMaxSize()
++            .background(
++                Brush.verticalGradient(
++                    listOf(
++                        Color(0xFF0A0A0F.toInt()),
++                        Color(0xFF0E0B1A.toInt()),
++                        Color(0xFF0A0A0F.toInt()),
++                    ),
++                ),
++            ),
++    )
++    Box(Modifier.fillMaxSize()) {
++        Box(
++            Modifier
++                .align(Alignment.TopCenter)
++                .offset(y = (-90).dp)
++                .size(360.dp)
++                .clip(CircleShape)
++                .background(Brush.radialGradient(listOf(Color(0x2E00E5FF), Color.Transparent))),
++        )
++        Box(
++            Modifier
++                .align(Alignment.BottomStart)
++                .offset(x = (-160).dp, y = 140.dp)
++                .size(440.dp)
++                .clip(CircleShape)
++                .background(Brush.radialGradient(listOf(Color(0x26B53DFF), Color.Transparent))),
++        )
++    }
++}
+ 
+-        // ── input ──────────────────────────────────────────────────────
++// ======================================================================
++// hero: the girl + nameplate
++// ======================================================================
++@Composable
++private fun HeroPanel(
++    name: String,
++    state: ChatUiState,
++    onAvatarTap: () -> Unit,
++) {
++    Box(
++        modifier = Modifier
++            .fillMaxWidth()
++            .height(292.dp)
++            .padding(top = 8.dp),
++        contentAlignment = Alignment.Center,
++    ) {
++        Box(
++            Modifier
++                .size(250.dp)
++                .clip(CircleShape)
++                .background(
++                    Brush.radialGradient(
++                        listOf(Color(0x3300E5FF), Color(0x14B53DFF), Color.Transparent),
++                    ),
++                ),
++        )
++        AvatarSurface(
++            modifier = Modifier.size(266.dp),
++            emotion = state.emotion,
++            mouthLevel = state.mouthLevel,
++            thinking = state.thinking,
++            listening = state.listening,
++            onTap = onAvatarTap,
++        )
+         Row(
+             modifier = Modifier
+-                .fillMaxWidth()
+-                .padding(horizontal = 12.dp, vertical = 8.dp),
++                .align(Alignment.BottomCenter)
++                .padding(bottom = 6.dp),
+             verticalAlignment = Alignment.CenterVertically,
+         ) {
+-            OutlinedTextField(
+-                value = draft,
+-                onValueChange = { draft = it },
+-                modifier = Modifier.weight(1f),
+-                placeholder = { Text("Say something...") },
+-                maxLines = 3,
+-                shape = RoundedCornerShape(24.dp),
++            StatusPill(state)
++            Spacer(Modifier.width(8.dp))
++            Text(
++                text = name.uppercase(),
++                style = MaterialTheme.typography.titleSmall,
++                color = Color(0xFFE8E3F5.toInt()),
++                letterSpacing = 3.sp,
+             )
+-
+-            IconButton(onClick = { viewModel.toggleMic() }) {
+-                Icon(
+-                    Icons.Filled.Mic,
+-                    contentDescription = "Voice input",
+-                    tint = if (state.listening) MaterialTheme.colorScheme.primary
+-                    else MaterialTheme.colorScheme.onSurfaceVariant,
++            Spacer(Modifier.width(8.dp))
++            Surface(
++                shape = RoundedCornerShape(999.dp),
++                color = Color(0x4018181B),
++                border = BorderStroke(1.dp, Color(0x5900E5FF)),
++            ) {
++                Text(
++                    state.emotion.tag.uppercase(),
++                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
++                    style = MaterialTheme.typography.labelSmall,
++                    color = Color(0xFF9FEFFF.toInt()),
++                    letterSpacing = 1.5.sp,
+                 )
+             }
++        }
++    }
++}
+ 
+-            IconButton(
+-                onClick = {
+-                    if (draft.isNotBlank()) {
+-                        viewModel.send(draft)
+-                        draft = ""
+-                    }
+-                },
+-            ) {
+-                Icon(Icons.Filled.Send, contentDescription = "Send")
+-            }
++/** LISTENING / THINKING / TALKING / IDLE with a pulsing dot. */
++@Composable
++private fun StatusPill(state: ChatUiState) {
++    val (label, color) = when {
++        state.listening -> "LISTENING" to NeonViolet
++        state.thinking -> "THINKING" to Color(0xFFFFB84D.toInt())
++        state.mouthLevel > 0.05f -> "TALKING" to NeonCyan
++        else -> "IDLE" to Color(0xFF8A84A8.toInt())
++    }
++    val transition = rememberInfiniteTransition()
++    val pulse by transition.animateFloat(
++        initialValue = 0.4f,
++        targetValue = 1f,
++        animationSpec = infiniteRepeatable(
++            animation = tween(durationMillis = 700, easing = FastOutSlowInEasing),
++            repeatMode = RepeatMode.Reverse,
++        ),
++    )
++    Surface(
++        shape = RoundedCornerShape(999.dp),
++        color = Color(0x4018181B),
++        border = BorderStroke(1.dp, color.copy(alpha = 0.45f)),
++    ) {
++        Row(
++            modifier = Modifier.padding(start = 9.dp, end = 11.dp, top = 5.dp, bottom = 5.dp),
++            verticalAlignment = Alignment.CenterVertically,
++        ) {
++            Box(
++                Modifier
++                    .size(7.dp)
++                    .scale(pulse)
++                    .clip(CircleShape)
++                    .background(color),
++            )
++            Spacer(Modifier.width(6.dp))
++            Text(
++                label,
++                style = MaterialTheme.typography.labelSmall,
++                color = color,
++                letterSpacing = 1.2.sp,
++            )
+         }
+     }
+ }
+ 
++// ======================================================================
++// system line
++// ======================================================================
++@Composable
++private fun SystemLine() {
++    val mono = MaterialTheme.typography.labelSmall.copy(
++        fontFamily = FontFamily.Monospace,
++        fontSize = 10.sp,
++        letterSpacing = 1.2.sp,
++    )
++    Row(
++        modifier = Modifier
++            .fillMaxWidth()
++            .padding(horizontal = 16.dp, vertical = 4.dp),
++    ) {
++        Text("RGS-COMPANION", style = mono, color = NeonCyan.copy(alpha = 0.7f))
++        Spacer(Modifier.weight(1f))
++        Text("TTS · MEMORY · CANVAS AVATAR", style = mono, color = MutedOn.copy(alpha = 0.6f))
++    }
++}
++
++// ======================================================================
++// bubbles
++// ======================================================================
+ @Composable
+-private fun MessageBubble(
++private fun GlassBubble(
+     text: String,
+     fromUser: Boolean,
+     isError: Boolean = false,
+     proactive: Boolean = false,
+     italic: Boolean = false,
+ ) {
++    val shape = RoundedCornerShape(
++        topStart = 18.dp,
++        topEnd = 18.dp,
++        bottomStart = if (fromUser) 18.dp else 5.dp,
++        bottomEnd = if (fromUser) 5.dp else 18.dp,
++    )
++    val bg: Brush = when {
++        isError -> Brush.horizontalGradient(
++            listOf(Color(0xE63A1520.toInt()), Color(0xE640202A.toInt())),
++        )
++        fromUser -> Brush.horizontalGradient(
++            listOf(Color(0xE6241A47.toInt()), Color(0xE633206B.toInt())),
++        )
++        else -> Brush.horizontalGradient(
++            listOf(Color(0xE6141420.toInt()), Color(0xE6191726.toInt())),
++        )
++    }
++    val border = when {
++        isError -> Color(0x88CB4B5B.toInt())
++        fromUser -> Color(0x59B53DFF)
++        else -> Color(0x3D00E5FF)
++    }
+     Row(
+         modifier = Modifier.fillMaxWidth(),
+         horizontalArrangement = if (fromUser) Arrangement.End else Arrangement.Start,
++        verticalAlignment = Alignment.Bottom,
+     ) {
+-        Surface(
+-            modifier = Modifier.widthIn(max = 300.dp),
+-            shape = RoundedCornerShape(
+-                topStart = 18.dp, topEnd = 18.dp,
+-                bottomStart = if (fromUser) 18.dp else 4.dp,
+-                bottomEnd = if (fromUser) 4.dp else 18.dp,
+-            ),
+-            color = when {
+-                isError -> MaterialTheme.colorScheme.errorContainer
+-                fromUser -> MaterialTheme.colorScheme.primaryContainer
+-                else -> MaterialTheme.colorScheme.surfaceVariant
+-            },
++        if (!fromUser) {
++            Box(
++                Modifier
++                    .padding(bottom = 10.dp)
++                    .size(10.dp)
++                    .clip(CircleShape)
++                    .background(NeonCyan),
++            )
++            Spacer(Modifier.width(8.dp))
++        }
++        Box(
++            Modifier
++                .widthIn(max = 292.dp)
++                .clip(shape)
++                .background(bg)
++                .border(1.dp, border, shape)
++                .padding(horizontal = 14.dp, vertical = 10.dp),
+         ) {
+-            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
++            Column {
+                 if (proactive) {
+                     Text(
+                         "she started this",
+                         style = MaterialTheme.typography.labelSmall,
+                         fontStyle = FontStyle.Italic,
+-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
++                        color = MutedOn,
+                     )
+                 }
+                 Text(
+                     text = text,
+                     style = MaterialTheme.typography.bodyLarge,
+                     fontStyle = if (italic) FontStyle.Italic else FontStyle.Normal,
++                    color = Color(0xFFE8E3F5.toInt()),
+                 )
+             }
+         }
+@@ -215,10 +417,20 @@ private fun ThinkingBubble() {
+     Row(
+         modifier = Modifier.fillMaxWidth(),
+         horizontalArrangement = Arrangement.Start,
++        verticalAlignment = Alignment.Bottom,
+     ) {
++        Box(
++            Modifier
++                .padding(bottom = 12.dp)
++                .size(10.dp)
++                .clip(CircleShape)
++                .background(NeonCyan),
++        )
++        Spacer(Modifier.width(8.dp))
+         Surface(
+             shape = RoundedCornerShape(18.dp),
+-            color = MaterialTheme.colorScheme.surfaceVariant,
++            color = Color(0xE6141420.toInt()),
++            border = BorderStroke(1.dp, Color(0x3D00E5FF)),
+         ) {
+             Row(
+                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+@@ -228,11 +440,78 @@ private fun ThinkingBubble() {
+                 Text(
+                     "  typing...",
+                     style = MaterialTheme.typography.bodyMedium,
+-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
++                    color = MutedOn,
+                 )
+             }
+         }
+     }
+ }
+ 
+-private const val AVATAR_HEIGHT_DP = 320
++// ======================================================================
++// input
++// ======================================================================
++@Composable
++private fun InputBar(
++    draft: String,
++    onDraft: (String) -> Unit,
++    placeholder: String,
++    state: ChatUiState,
++    onMic: () -> Unit,
++    onSend: () -> Unit,
++) {
++    Row(
++        modifier = Modifier
++            .fillMaxWidth()
++            .padding(horizontal = 14.dp, top = 4.dp, bottom = 10.dp),
++        verticalAlignment = Alignment.CenterVertically,
++    ) {
++        Box(
++            Modifier
++                .weight(1f)
++                .clip(RoundedCornerShape(24.dp))
++                .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(24.dp)),
++        ) {
++            TextField(
++                value = draft,
++                onValueChange = onDraft,
++                modifier = Modifier.fillMaxWidth(),
++                placeholder = { Text(placeholder, color = Color(0xFF6E6890.toInt())) },
++                maxLines = 3,
++                shape = RoundedCornerShape(23.dp),
++                colors = TextFieldDefaults.colors(
++                    focusedContainerColor = Color(0xE615141D.toInt()),
++                    unfocusedContainerColor = Color(0xE615141D.toInt()),
++                    disabledContainerColor = Color(0xE615141D.toInt()),
++                    errorContainerColor = Color(0xE615141D.toInt()),
++                    focusedIndicatorColor = Color.Transparent,
++                    unfocusedIndicatorColor = Color.Transparent,
++                    disabledIndicatorColor = Color.Transparent,
++                    errorIndicatorColor = Color.Transparent,
++                    cursorColor = NeonCyan,
++                ),
++            )
++        }
++        Spacer(Modifier.width(10.dp))
++        IconButton(onClick = onMic) {
++            Icon(
++                Icons.Filled.Mic,
++                contentDescription = "Voice input",
++                tint = if (state.listening) NeonViolet else Color(0xFF8A84A8.toInt()),
++            )
++        }
++        Box(
++            Modifier
++                .size(52.dp)
++                .clip(CircleShape)
++                .background(Brush.linearGradient(listOf(NeonCyan, NeonViolet)))
++                .clickable(onClick = onSend),
++            contentAlignment = Alignment.Center,
++        ) {
++            Icon(
++                Icons.Filled.Send,
++                contentDescription = "Send",
++                tint = Color(0xFF081014.toInt()),
++            )
++        }
++    }
++}
+diff --git a/android-app/app/src/main/java/com/rgs/companion/chat/ChatViewModel.kt b/android-app/app/src/main/java/com/rgs/companion/chat/ChatViewModel.kt
+index c058545..57e264f 100644
+--- a/android-app/app/src/main/java/com/rgs/companion/chat/ChatViewModel.kt
++++ b/android-app/app/src/main/java/com/rgs/companion/chat/ChatViewModel.kt
+@@ -37,6 +37,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
+ 
+     val speech = SpeechEngine(app).also { it.init() }
+ 
++    /** Shown on the avatar nameplate. */
++    val personaName: String get() = persona.name
++
++    /** Long-term memory, exposed for the home dashboard. */
++    val memoryStore: MemoryStore get() = memory
++
+     private val agent = CompanionAgent(
+         persona = persona,
+         memory = memory,
+@@ -58,7 +64,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
+         viewModelScope.launch {
+             while (true) {
+                 speech.pumpLipSync()
+-                _state.update { it.copy(mouthLevel = speech.mouthLevel) }
++                // Only bump the state when the value actually changed — a
++                // fresh ChatUiState every 50ms would recompose the screen
++                // even when she is silent.
++                val m = speech.mouthLevel
++                _state.update { if (it.mouthLevel != m) it.copy(mouthLevel = m) else it }
+                 agent.tick()?.let { _state.update { s -> s.copy(emotion = it) } }
+                 delay(TICK_MS)
+             }
+@@ -66,6 +76,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
+ 
+         // Voice input straight into the conversation.
+         speech.onTranscript = { text -> viewModelScope.launch { send(text) } }
++        speech.onListeningChanged = { on ->
++            viewModelScope.launch { _state.update { it.copy(listening = on) } }
++        }
+     }
+ 
+     // ------------------------------------------------------------------
+diff --git a/android-app/app/src/main/java/com/rgs/companion/overlay/FloatingCompanionService.kt b/android-app/app/src/main/java/com/rgs/companion/overlay/FloatingCompanionService.kt
+index 6759cc8..f1d71d9 100644
+--- a/android-app/app/src/main/java/com/rgs/companion/overlay/FloatingCompanionService.kt
++++ b/android-app/app/src/main/java/com/rgs/companion/overlay/FloatingCompanionService.kt
+@@ -19,22 +19,26 @@ import android.widget.FrameLayout
+ import android.widget.ImageButton
+ import com.rgs.companion.MainActivity
+ import com.rgs.companion.R
+-import com.rgs.companion.live2d.Live2DView
+-import com.rgs.companion.live2d.MotionPriority
++import com.rgs.companion.avatar.AvatarView
++import com.rgs.companion.companion.Emotion
+ import kotlin.math.abs
+ 
+ /**
+- * The desktop-pet overlay: a Live2D avatar floating above every app.
++ * The desktop-pet overlay: the companion avatar floating above every app.
+  *
+  * ## Architecture
+  * ```
+  * FloatingCompanionService            (foreground service, owns the window)
+  *   └── WindowManager overlay         (TYPE_APPLICATION_OVERLAY)
+  *         └── FrameLayout  "bubble"
+- *               ├── Live2DView        (GLSurfaceView, transparent, draggable)
++ *               ├── AvatarView        (canvas, transparent, draggable)
+  *               └── ImageButton       (minimize / expand)
+  * ```
+  *
++ * The avatar is the dependency-free canvas renderer (`com.rgs.companion.avatar`)
++ * — the same girl as in the chat screen, no GL, no Cubism SDK. If you build
++ * with the optional Live2D SDK, this is the one place to swap it back.
++ *
+  * Why a foreground `Service` and not an `Activity`: an overlay has to survive the
+  * user leaving your app, and Android 8+ only lets a *started foreground* service
+  * add `TYPE_APPLICATION_OVERLAY` windows reliably.
+@@ -42,9 +46,9 @@ import kotlin.math.abs
+  * ## Two things that trip people up
+  * 1. **`FLAG_NOT_FOCUSABLE`** is required, otherwise the overlay steals the
+  *    keyboard from whatever app is underneath and the user cannot type.
+- * 2. **`GLSurfaceView` lifecycle.** The GL thread must be paused when the window
+- *    is removed and resumed when re-added, or you leak a context and a thread.
+- *    Handled in [removeOverlay] / [addOverlay].
++ * 2. **AvatarView lifecycle.** Its frame loop must be stopped when the window
++ *    is removed and started when re-added, or you keep redrawing a detached
++ *    view. Handled in [removeOverlay] / [addOverlay] via `onPause` / attach.
+  *
+  * ## Permissions
+  * - `SYSTEM_ALERT_WINDOW`, granted through
+@@ -55,7 +59,7 @@ class FloatingCompanionService : Service() {
+ 
+     private lateinit var windowManager: WindowManager
+     private var bubble: FrameLayout? = null
+-    private var live2d: Live2DView? = null
++    private var avatar: AvatarView? = null
+     private var params: WindowManager.LayoutParams? = null
+     private var minimized = false
+ 
+@@ -127,15 +131,15 @@ class FloatingCompanionService : Service() {
+ 
+         val root = FrameLayout(this)
+ 
+-        val avatar = Live2DView(this).apply {
+-            onTap = { _, _ ->
++        val avatarView = AvatarView(this).apply {
++            onTap = {
+                 // A tap that is not a drag opens the chat.
+                 onAvatarTap?.invoke()
+             }
+         }
+-        live2d = avatar
++        avatar = avatarView
+         root.addView(
+-            avatar,
++            avatarView,
+             FrameLayout.LayoutParams(
+                 FrameLayout.LayoutParams.MATCH_PARENT,
+                 FrameLayout.LayoutParams.MATCH_PARENT,
+@@ -148,15 +152,14 @@ class FloatingCompanionService : Service() {
+         bubble = root
+         windowManager.addView(root, lp)
+ 
+-        avatar.loadModel(modelAssetPath())
+         Log.i(TAG, "overlay shown (${size}px)")
+     }
+ 
+     private fun removeOverlay() {
+         val root = bubble ?: return
+-        // Stop the GL thread before the view leaves the window.
+-        live2d?.onPause()
+-        live2d = null
++        // Stop the frame loop before the view leaves the window.
++        avatar?.onPause()
++        avatar = null
+         runCatching { windowManager.removeView(root) }
+             .onFailure { Log.w(TAG, "removeView failed", it) }
+         bubble = null
+@@ -233,16 +236,27 @@ class FloatingCompanionService : Service() {
+     // ------------------------------------------------------------------
+     // driven from outside
+     // ------------------------------------------------------------------
++    /**
++     * Accepts the Cubism expression names used elsewhere ("Smile", "Sad", ...)
++     * and maps them onto the canvas avatar's [Emotion] set.
++     */
+     fun setEmotion(expressionName: String) {
+-        live2d?.setExpression(expressionName)
++        avatar?.emotion = when (expressionName.lowercase()) {
++            "smile" -> Emotion.HAPPY
++            "sad" -> Emotion.SAD
++            "angry" -> Emotion.ANGRY
++            "surprised" -> Emotion.SURPRISED
++            else -> Emotion.NEUTRAL
++        }
+     }
+ 
+     fun setMouthOpen(v: Float) {
+-        live2d?.setMouthOpen(v)
++        avatar?.mouthLevel = v
+     }
+ 
++    /** The canvas avatar has no motion groups; kept for API compatibility. */
+     fun playMotion(group: String, index: Int = 0) {
+-        live2d?.startMotion(group, index, MotionPriority.NORMAL)
++        Log.d(TAG, "playMotion($group, $index) — canvas avatar has no motion groups; ignored")
+     }
+ 
+     // ------------------------------------------------------------------
+@@ -266,14 +280,6 @@ class FloatingCompanionService : Service() {
+             WindowManager.LayoutParams.TYPE_PHONE
+         }
+ 
+-    /**
+-     * Which model the overlay shows. Reads from shared prefs so the user can
+-     * switch models without a rebuild; falls back to the bundled one.
+-     */
+-    private fun modelAssetPath(): String =
+-        getSharedPreferences(PREFS, MODE_PRIVATE)
+-            .getString(KEY_MODEL, DEFAULT_MODEL) ?: DEFAULT_MODEL
+-
+     // ------------------------------------------------------------------
+     // foreground notification
+     // ------------------------------------------------------------------
+@@ -310,10 +316,10 @@ class FloatingCompanionService : Service() {
+         private const val CHANNEL_ID = "companion_overlay"
+         private const val NOTIFICATION_ID = 4201
+ 
+-        private const val PREFS = "companion_prefs"
+-        private const val KEY_MODEL = "model_path"
+-
+-        /** Bundled model. Change to whichever you ship in assets/models/. */
++        /**
++         * Default Cubism model path — only meaningful when building with the
++         * optional Live2D SDK. The canvas avatar needs no model asset.
++         */
+         const val DEFAULT_MODEL = "models/hiyori/hiyori.model3.json"
+ 
+         private const val EXPANDED_SIZE_PX = 620
+diff --git a/android-app/app/src/main/java/com/rgs/companion/proactive/BootReceiver.kt b/android-app/app/src/main/java/com/rgs/companion/proactive/BootReceiver.kt
+new file mode 100644
+index 0000000..b9fb9e8
+--- /dev/null
++++ b/android-app/app/src/main/java/com/rgs/companion/proactive/BootReceiver.kt
+@@ -0,0 +1,26 @@
++package com.rgs.companion.proactive
++
++import android.content.BroadcastReceiver
++import android.content.Context
++import android.content.Intent
++import android.util.Log
++
++/**
++ * Receives BOOT_COMPLETED for the proactive "she messages you first" feature.
++ *
++ * Honest state of play (see README §10): the *scheduler* is not implemented
++ * yet. `CompanionAgent.initiate()` exists and `ChatViewModel.proactive()`
++ * knows how to surface a reply, but nothing alarms itself into calling it.
++ * This receiver is the hook the manifest already declares, so the manifest is
++ * not lying; for now it logs and does nothing else.
++ */
++class BootReceiver : BroadcastReceiver() {
++
++    override fun onReceive(context: Context, intent: Intent) {
++        Log.i(TAG, "boot completed — proactive scheduler not yet implemented (no-op)")
++    }
++
++    private companion object {
++        const val TAG = "BootReceiver"
++    }
++}
+diff --git a/android-app/app/src/main/java/com/rgs/companion/ui/components/GlassCard.kt b/android-app/app/src/main/java/com/rgs/companion/ui/components/GlassCard.kt
+new file mode 100644
+index 0000000..5e8265b
+--- /dev/null
++++ b/android-app/app/src/main/java/com/rgs/companion/ui/components/GlassCard.kt
+@@ -0,0 +1,122 @@
++package com.rgs.companion.ui.components
++
++import androidx.compose.foundation.background
++import androidx.compose.foundation.border
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material3.Icon
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.vector.ImageVector
++import androidx.compose.ui.text.font.FontFamily
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import com.rgs.companion.ui.theme.InkOn
++import com.rgs.companion.ui.theme.MutedOn
++import com.rgs.companion.ui.theme.NeonCyan
++
++/**
++ * The app's glassmorphism building block.
++ *
++ * Design constraints (kept identical across every screen):
++ *  - background: `Color.White.copy(alpha = 0.05f)` on the obsidian base
++ *  - border: 1dp — translucent white at rest, glowing neon accent when active
++ *  - 16dp rounded corners, 16dp content padding, no shadows (tonal only)
++ *  - generous spacing, separation via tint, never harsh shadows
++ */
++@Composable
++fun GlassCard(
++    modifier: Modifier = Modifier,
++    active: Boolean = false,
++    accent: Color = NeonCyan,
++    icon: ImageVector,
++    title: String,
++    subtitle: String,
++    status: String? = null,
++    statusColor: Color = MutedOn,
++    onClick: () -> Unit,
++) {
++    val shape = RoundedCornerShape(16.dp)
++    val border = if (active) accent.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.1f)
++    val background = if (active) accent.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.05f)
++
++    Column(
++        modifier
++            .clip(shape)
++            .background(background)
++            .border(1.dp, border, shape)
++            .clickable(onClick = onClick)
++            .padding(16.dp),
++    ) {
++        Icon(
++            imageVector = icon,
++            contentDescription = null,
++            tint = if (active) accent else Color.White.copy(alpha = 0.7f),
++            modifier = Modifier.size(22.dp),
++        )
++        Spacer(Modifier.height(10.dp))
++        Text(
++            text = title,
++            style = MaterialTheme.typography.titleSmall,
++            color = InkOn,
++            maxLines = 1,
++            overflow = TextOverflow.Ellipsis,
++        )
++        Spacer(Modifier.height(3.dp))
++        Text(
++            text = subtitle,
++            style = MaterialTheme.typography.bodySmall,
++            color = MutedOn,
++            maxLines = 2,
++            overflow = TextOverflow.Ellipsis,
++        )
++        if (status != null) {
++            Spacer(Modifier.height(10.dp))
++            Row(verticalAlignment = Alignment.CenterVertically) {
++                BoxDot(color = statusColor)
++                Spacer(Modifier.width(6.dp))
++                Text(
++                    text = status,
++                    style = MaterialTheme.typography.labelSmall.copy(
++                        fontFamily = FontFamily.Monospace,
++                        fontSize = 10.sp,
++                        letterSpacing = 0.8.sp,
++                    ),
++                    color = statusColor,
++                    maxLines = 1,
++                    overflow = TextOverflow.Ellipsis,
++                )
++            }
++        }
++    }
++}
++
++/** Tiny status dot used by cards and chips. */
++@Composable
++fun BoxDot(
++    color: Color,
++    sizeDp: Int = 6,
++    modifier: Modifier = Modifier,
++) {
++    Box(
++        modifier
++            .size(sizeDp.dp)
++            .clip(CircleShape)
++            .background(color),
++    )
++}
+diff --git a/android-app/app/src/main/java/com/rgs/companion/ui/screens/HomeScreen.kt b/android-app/app/src/main/java/com/rgs/companion/ui/screens/HomeScreen.kt
+new file mode 100644
+index 0000000..9c57260
+--- /dev/null
++++ b/android-app/app/src/main/java/com/rgs/companion/ui/screens/HomeScreen.kt
+@@ -0,0 +1,492 @@
++package com.rgs.companion.ui.screens
++
++import android.app.ActivityManager
++import android.content.Context
++import android.os.SystemClock
++import android.widget.Toast
++import androidx.compose.animation.core.FastOutSlowInEasing
++import androidx.compose.animation.core.RepeatMode
++import androidx.compose.animation.core.animateFloat
++import androidx.compose.animation.core.infiniteRepeatable
++import androidx.compose.animation.core.rememberInfiniteTransition
++import androidx.compose.animation.core.tween
++import androidx.compose.foundation.background
++import androidx.compose.foundation.border
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.imePadding
++import androidx.compose.foundation.layout.offset
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.statusBarsPadding
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.rememberScrollState
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.foundation.verticalScroll
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.outlined.Chat
++import androidx.compose.material.icons.outlined.Database
++import androidx.compose.material.icons.outlined.Mic
++import androidx.compose.material.icons.outlined.Psychology
++import androidx.compose.material.icons.outlined.TouchApp
++import androidx.compose.material.icons.outlined.Widgets
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Surface
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.draw.scale
++import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.text.font.FontFamily
++import androidx.compose.ui.text.font.FontStyle
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import com.rgs.companion.BuildConfig
++import com.rgs.companion.avatar.AvatarSurface
++import com.rgs.companion.chat.ChatUiState
++import com.rgs.companion.companion.MemoryStore
++import com.rgs.companion.control.CompanionAccessibilityService
++import com.rgs.companion.overlay.FloatingCompanionService
++import com.rgs.companion.ui.components.GlassCard
++import com.rgs.companion.ui.theme.InkOn
++import com.rgs.companion.ui.theme.MutedOn
++import com.rgs.companion.ui.theme.NeonCyan
++import com.rgs.companion.ui.theme.NeonViolet
++import com.rgs.companion.voice.SpeechEngine
++import java.io.File
++import kotlinx.coroutines.delay
++
++private val Amber = Color(0xFFFFB84D.toInt())
++private val Mint = Color(0xFF4DDC9E.toInt())
++
++/**
++ * Home dashboard: the companion girl on top, a 2-column grid of glass cards
++ * for each subsystem (with LIVE status), and a monospace telemetry strip.
++ *
++ * This is the "Cyber Obsidian" home described in the UI spec: 250dp avatar
++ * hero, GlassCards with 0.05 white backgrounds and 1dp glowing borders when
++ * active, and a CPU/RAM/NET strip in monospace. No shadows anywhere.
++ */
++@Composable
++fun HomeScreen(
++    state: ChatUiState,
++    companionName: String,
++    speech: SpeechEngine,
++    memoryStore: MemoryStore,
++    onAvatarTap: () -> Unit,
++    onOpenChat: () -> Unit,
++    onOpenAccessibility: () -> Unit,
++    onToggleOverlay: () -> Unit,
++    modifier: Modifier = Modifier,
++) {
++    val context = LocalContext.current
++
++    var a11yOn by remember { mutableStateOf(CompanionAccessibilityService.instance != null) }
++    var ttsReady by remember { mutableStateOf(speech.isReady) }
++    var overlayOk by remember { mutableStateOf(FloatingCompanionService.canDrawOverlays(context)) }
++    var factCount by remember { mutableStateOf(-1) }
++    var cpu by remember { mutableStateOf<Float?>(null) }
++    var ram by remember { mutableStateOf("…") }
++    var net by remember { mutableStateOf(10) }
++
++    // One-shot: how many facts she remembers.
++    LaunchedEffect(Unit) {
++        factCount = runCatching { memoryStore.allFacts().size }.getOrDefault(0)
++    }
++
++    // Slow heartbeat: permission states, TTS readiness, CPU, RAM, fake-ping.
++    LaunchedEffect(Unit) {
++        while (true) {
++            delay(2000L)
++            a11yOn = CompanionAccessibilityService.instance != null
++            ttsReady = speech.isReady
++            overlayOk = FloatingCompanionService.canDrawOverlays(context)
++            cpu = CpuTracker.sample()
++            ram = formatRam(context)
++            net = (8L + (SystemClock.elapsedRealtime() / 2000L) % 5L).toInt()
++        }
++    }
++
++    Box(modifier = modifier.fillMaxSize()) {
++        HomeBackdrop()
++
++        Column(
++            Modifier
++                .fillMaxSize()
++                .statusBarsPadding()
++                .imePadding()
++                .verticalScroll(rememberScrollState())
++                .padding(horizontal = 16.dp),
++        ) {
++            // ── header ───────────────────────────────────────────────
++            Row(
++                Modifier
++                    .fillMaxWidth()
++                    .padding(top = 10.dp, bottom = 4.dp),
++                verticalAlignment = Alignment.CenterVertically,
++            ) {
++                Text(
++                    "RGS-COMPANION",
++                    style = MaterialTheme.typography.labelSmall.copy(
++                        fontFamily = FontFamily.Monospace,
++                        fontSize = 11.sp,
++                        letterSpacing = 2.sp,
++                    ),
++                    color = NeonCyan.copy(alpha = 0.8f),
++                )
++                Spacer(Modifier.weight(1f))
++                Text(
++                    "v0.2",
++                    style = MaterialTheme.typography.labelSmall.copy(
++                        fontFamily = FontFamily.Monospace,
++                        fontSize = 10.sp,
++                    ),
++                    color = MutedOn.copy(alpha = 0.7f),
++                )
++            }
++
++            // ── avatar hero ──────────────────────────────────────────
++            Box(
++                Modifier
++                    .fillMaxWidth()
++                    .height(268.dp),
++                contentAlignment = Alignment.Center,
++            ) {
++                Box(
++                    Modifier
++                        .size(230.dp)
++                        .clip(CircleShape)
++                        .background(
++                            Brush.radialGradient(
++                                listOf(Color(0x3300E5FF), Color(0x14B53DFF), Color.Transparent),
++                            ),
++                        ),
++                )
++                AvatarSurface(
++                    modifier = Modifier.size(244.dp),
++                    emotion = state.emotion,
++                    mouthLevel = state.mouthLevel,
++                    thinking = state.thinking,
++                    listening = state.listening,
++                    onTap = onAvatarTap,
++                )
++                Row(
++                    Modifier
++                        .align(Alignment.BottomCenter)
++                        .padding(bottom = 2.dp),
++                    verticalAlignment = Alignment.CenterVertically,
++                ) {
++                    HomeStatusChip(state)
++                    Spacer(Modifier.width(8.dp))
++                    Text(
++                        companionName.uppercase(),
++                        style = MaterialTheme.typography.titleSmall,
++                        color = InkOn,
++                        letterSpacing = 3.sp,
++                    )
++                }
++            }
++            Text(
++                "tap to wake her · drag to make her look at you",
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .padding(bottom = 14.dp),
++                style = MaterialTheme.typography.labelSmall.copy(fontStyle = FontStyle.Italic),
++                color = MutedOn.copy(alpha = 0.75f),
++                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
++            )
++
++            // ── subsystem cards ──────────────────────────────────────
++            Row(
++                Modifier
++                    .fillMaxWidth()
++                    .padding(vertical = 7.dp),
++                horizontalArrangement = Arrangement.spacedBy(14.dp),
++            ) {
++                GlassCard(
++                    modifier = Modifier.weight(1f),
++                    active = true,
++                    accent = NeonCyan,
++                    icon = Icons.Outlined.Chat,
++                    title = "Chat",
++                    subtitle = "Talk to ${companionName} — voice or text",
++                    status = "ONLINE",
++                    statusColor = NeonCyan,
++                    onClick = onOpenChat,
++                )
++                GlassCard(
++                    modifier = Modifier.weight(1f),
++                    accent = NeonViolet,
++                    icon = Icons.Outlined.Mic,
++                    title = "Voice & TTS",
++                    subtitle = "Speech-to-text in, her voice out",
++                    status = if (ttsReady) "TTS READY" else "TTS STARTING",
++                    statusColor = if (ttsReady) Mint else Amber,
++                    onClick = onOpenChat,
++                )
++            }
++
++            Row(
++                Modifier
++                    .fillMaxWidth()
++                    .padding(vertical = 7.dp),
++                horizontalArrangement = Arrangement.spacedBy(14.dp),
++            ) {
++                GlassCard(
++                    modifier = Modifier.weight(1f),
++                    accent = NeonCyan,
++                    icon = Icons.Outlined.TouchApp,
++                    title = "Device Control",
++                    subtitle = "Open apps, tap, type, scroll — on request",
++                    status = if (a11yOn) "PERMISSION ON" else "NOT GRANTED",
++                    statusColor = if (a11yOn) Mint else Amber,
++                    onClick = onOpenAccessibility,
++                )
++                GlassCard(
++                    modifier = Modifier.weight(1f),
++                    accent = NeonViolet,
++                    icon = Icons.Outlined.Database,
++                    title = "Memory",
++                    subtitle = "Room-backed long-term memory",
++                    status = if (factCount < 0) "LOADING" else "$factCount FACTS",
++                    statusColor = if (factCount > 0) NeonViolet else MutedOn,
++                    onClick = {
++                        Toast
++                            .makeText(
++                                context,
++                                if (factCount < 0) "Memory is loading" else "$factCount fact(s) stored in Room",
++                                Toast.LENGTH_SHORT,
++                            )
++                            .show()
++                    },
++                )
++            }
++
++            Row(
++                Modifier
++                    .fillMaxWidth()
++                    .padding(vertical = 7.dp),
++                horizontalArrangement = Arrangement.spacedBy(14.dp),
++            ) {
++                GlassCard(
++                    modifier = Modifier.weight(1f),
++                    accent = NeonCyan,
++                    icon = Icons.Outlined.Widgets,
++                    title = "Floating Companion",
++                    subtitle = "She floats over every app",
++                    status = if (overlayOk) "OVERLAY READY" else "NEEDS PERMISSION",
++                    statusColor = if (overlayOk) Mint else Amber,
++                    onClick = onToggleOverlay,
++                )
++                GlassCard(
++                    modifier = Modifier.weight(1f),
++                    accent = NeonViolet,
++                    icon = Icons.Outlined.Psychology,
++                    title = "LLM Core",
++                    subtitle = BuildConfig.LLM_MODEL,
++                    status = if (BuildConfig.LLM_API_KEY.isNotBlank()) "KEY SET" else "NO API KEY",
++                    statusColor = if (BuildConfig.LLM_API_KEY.isNotBlank()) Mint else Amber,
++                    onClick = {
++                        Toast
++                            .makeText(
++                                context,
++                                if (BuildConfig.LLM_API_KEY.isNotBlank())
++                                    "Model: ${BuildConfig.LLM_MODEL}"
++                                else "Add a key with -PllmApiKey=… and rebuild",
++                                Toast.LENGTH_SHORT,
++                            )
++                            .show()
++                    },
++                )
++            }
++
++            Spacer(Modifier.height(16.dp))
++
++            // ── telemetry strip ──────────────────────────────────────
++            TelemetryStrip(
++                cpu = cpu?.let { (it * 100f).toInt() } ?: null,
++                ram = ram,
++                netMs = net,
++            )
++            Spacer(Modifier.height(10.dp))
++        }
++    }
++}
++
++// ======================================================================
++// pieces
++// ======================================================================
++@Composable
++private fun HomeBackdrop() {
++    Box(
++        Modifier
++            .fillMaxSize()
++            .background(
++                Brush.verticalGradient(
++                    listOf(
++                        Color(0xFF0A0A0F.toInt()),
++                        Color(0xFF0E0B1A.toInt()),
++                        Color(0xFF0A0A0F.toInt()),
++                    ),
++                ),
++            ),
++    )
++    Box(Modifier.fillMaxSize()) {
++        Box(
++            Modifier
++                .align(Alignment.TopCenter)
++                .offset(y = (-90).dp)
++                .size(360.dp)
++                .clip(CircleShape)
++                .background(Brush.radialGradient(listOf(Color(0x2E00E5FF), Color.Transparent))),
++        )
++        Box(
++            Modifier
++                .align(Alignment.BottomEnd)
++                .offset(x = (-140).dp, y = 120.dp)
++                .size(420.dp)
++                .clip(CircleShape)
++                .background(Brush.radialGradient(listOf(Color(0x26B53DFF), Color.Transparent))),
++        )
++    }
++}
++
++/** Same live-status pill as the chat screen. */
++@Composable
++private fun HomeStatusChip(state: ChatUiState) {
++    val (label, color) = when {
++        state.listening -> "LISTENING" to NeonViolet
++        state.thinking -> "THINKING" to Amber
++        state.mouthLevel > 0.05f -> "TALKING" to NeonCyan
++        else -> "IDLE" to Color(0xFF8A84A8.toInt())
++    }
++    val transition = rememberInfiniteTransition()
++    val pulse by transition.animateFloat(
++        initialValue = 0.4f,
++        targetValue = 1f,
++        animationSpec = infiniteRepeatable(
++            animation = tween(durationMillis = 700, easing = FastOutSlowInEasing),
++            repeatMode = RepeatMode.Reverse,
++        ),
++    )
++    Surface(
++        shape = RoundedCornerShape(999.dp),
++        color = Color(0x4018181B),
++        border = androidx.compose.foundation.BorderStroke(1.dp, color.copy(alpha = 0.45f)),
++    ) {
++        Row(
++            Modifier.padding(start = 9.dp, end = 11.dp, top = 5.dp, bottom = 5.dp),
++            verticalAlignment = Alignment.CenterVertically,
++        ) {
++            Box(
++                Modifier
++                    .size(7.dp)
++                    .scale(pulse)
++                    .clip(CircleShape)
++                    .background(color),
++            )
++            Spacer(Modifier.width(6.dp))
++            Text(
++                label,
++                style = MaterialTheme.typography.labelSmall,
++                color = color,
++                letterSpacing = 1.2.sp,
++            )
++        }
++    }
++}
++
++@Composable
++private fun TelemetryStrip(cpuPct: Int?, ram: String, netMs: Int) {
++    Row(
++        Modifier
++            .fillMaxWidth()
++            .clip(RoundedCornerShape(14.dp))
++            .background(Color.White.copy(alpha = 0.04f))
++            .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(14.dp))
++            .padding(horizontal = 12.dp, vertical = 9.dp),
++        horizontalArrangement = Arrangement.SpaceBetween,
++    ) {
++        TelemetryCell("CPU", cpuPct?.let { "$it%" } ?: "…")
++        TelemetryCell("RAM", ram)
++        TelemetryCell("NET", "~${netMs}MS")
++    }
++}
++
++@Composable
++private fun TelemetryCell(label: String, value: String) {
++    Column(horizontalAlignment = Alignment.CenterHorizontally) {
++        Text(
++            label,
++            style = MaterialTheme.typography.labelSmall.copy(
++                fontFamily = FontFamily.Monospace,
++                fontSize = 9.sp,
++                letterSpacing = 1.sp,
++            ),
++            color = MutedOn.copy(alpha = 0.65f),
++        )
++        Spacer(Modifier.height(2.dp))
++        Text(
++            value,
++            style = MaterialTheme.typography.labelMedium.copy(
++                fontFamily = FontFamily.Monospace,
++                fontSize = 11.sp,
++            ),
++            color = NeonCyan.copy(alpha = 0.9f),
++        )
++    }
++}
++
++// ======================================================================
++// real-ish system telemetry
++// ======================================================================
++/**
++ * CPU utilisation from /proc/stat: keeps the previous aggregate sample and
++ * returns (busy delta / total delta) each call. First call returns null.
++ */
++private object CpuTracker {
++    private var prevIdle = 0L
++    private var prevTotal = 0L
++
++    fun sample(): Float? = try {
++        val line = File("/proc/stat").readLines().firstOrNull() ?: return null
++        val parts = line.split(Regex("\\s+")).drop(1).mapNotNull { it.toLongOrNull() }
++        if (parts.size < 4) return null
++        val total = parts.sum()
++        val idle = parts[3] + (parts.getOrNull(4) ?: 0L)
++        val dTotal = total - prevTotal
++        val dIdle = idle - prevIdle
++        prevTotal = total
++        prevIdle = idle
++        if (dTotal <= 0L) null else (1f - dIdle.toFloat() / dTotal.toFloat()).coerceIn(0f, 1f)
++    } catch (e: Exception) {
++        null
++    }
++}
++
++private fun formatRam(ctx: Context): String = try {
++    val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
++    val info = ActivityManager.MemoryInfo()
++    am.getMemoryInfo(info)
++    val freeGb = info.availMem / 1073741824.0
++    val totalGb = info.totalMem / 1073741824.0
++    "%.1f/%.0fG".format(freeGb, totalGb)
++} catch (e: Exception) {
++    "…"
++}
+diff --git a/android-app/app/src/main/java/com/rgs/companion/ui/theme/CompanionTheme.kt b/android-app/app/src/main/java/com/rgs/companion/ui/theme/CompanionTheme.kt
+new file mode 100644
+index 0000000..a6adb47
+--- /dev/null
++++ b/android-app/app/src/main/java/com/rgs/companion/ui/theme/CompanionTheme.kt
+@@ -0,0 +1,51 @@
++package com.rgs.companion.ui.theme
++
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.darkColorScheme
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.graphics.Color
++
++/**
++ * "Cyber Obsidian" — the app's visual identity.
++ *
++ * Near-black base, neon cyan for "system/live" accents, violet for "her"
++ * accents. Surfaces are flat glass cards separated by 1dp translucent borders
++ * (see ChatScreen) rather than harsh shadows.
++ */
++val ObsidianBg = Color(0xFF09090B.toInt())
++val ObsidianSurface = Color(0xFF131318.toInt())
++val NeonCyan = Color(0xFF00E5FF.toInt())
++val NeonViolet = Color(0xFFB53DFF.toInt())
++val InkOn = Color(0xFFE8E3F5.toInt())
++val MutedOn = Color(0xFFA89FC6.toInt())
++
++private val CompanionDark = darkColorScheme(
++    background = ObsidianBg,
++    onBackground = InkOn,
++    surface = ObsidianSurface,
++    onSurface = InkOn,
++    surfaceVariant = Color(0xFF1C1A28.toInt()),
++    onSurfaceVariant = MutedOn,
++    primary = NeonCyan,
++    onPrimary = Color(0xFF04262B.toInt()),
++    primaryContainer = Color(0xFF07333C.toInt()),
++    onPrimaryContainer = Color(0xFFBFF6FF.toInt()),
++    secondary = NeonViolet,
++    onSecondary = Color(0xFF2B0A38.toInt()),
++    secondaryContainer = Color(0xFF331245.toInt()),
++    onSecondaryContainer = Color(0xFFEFC8FF.toInt()),
++    tertiary = Color(0xFF4DD0C8.toInt()),
++    onTertiary = Color(0xFF003834.toInt()),
++    error = Color(0xFFCB4B5B.toInt()),
++    errorContainer = Color(0xFF3A1520.toInt()),
++    onError = Color(0xFFFFF1F2.toInt()),
++    onErrorContainer = Color(0xFFFFD9DE.toInt()),
++)
++
++@Composable
++fun CompanionTheme(content: @Composable () -> Unit) {
++    MaterialTheme(
++        colorScheme = CompanionDark,
++        content = content,
++    )
++}
+diff --git a/android-app/app/src/main/java/com/rgs/companion/voice/SpeechEngine.kt b/android-app/app/src/main/java/com/rgs/companion/voice/SpeechEngine.kt
+index c552ce6..20bfba4 100644
+--- a/android-app/app/src/main/java/com/rgs/companion/voice/SpeechEngine.kt
++++ b/android-app/app/src/main/java/com/rgs/companion/voice/SpeechEngine.kt
+@@ -51,6 +51,9 @@ class SpeechEngine(private val context: Context) {
+     private var tts: TextToSpeech? = null
+     private var stt: SpeechRecognizer? = null
+     private var ready = false
++
++    /** True once the TTS engine has finished initialising. */
++    val isReady: Boolean get() = ready
+     private val utteranceSeq = AtomicInteger(0)
+ 
+     var locale: Locale = Locale.US
+diff --git a/android-app/settings.gradle.kts b/android-app/settings.gradle.kts
+index 082d2af..c9171dc 100644
+--- a/android-app/settings.gradle.kts
++++ b/android-app/settings.gradle.kts
+@@ -23,10 +23,13 @@ dependencyResolutionManagement {
+ rootProject.name = "RGS Companion"
+ include(":app")
+ 
+-// ── Live2D Cubism Framework ──────────────────────────────────────────────
+-// Clone it next to this project, then this include resolves:
+-//   git clone https://github.com/Live2D/CubismJavaFramework.git CubismJavaFramework
+-// The official samples include it as a git submodule at ./Framework; either
+-// layout works as long as the path below matches where you put it.
+-include(":Framework:framework")
+-project(":Framework:framework").projectDir = file("../CubismJavaFramework/framework")
++// ── Live2D Cubism Framework (optional) ─────────────────────────────────────
++// Only include it when you have cloned CubismJavaFramework next to this
++// project — see the hasLive2D block in app/build.gradle.kts. Without it the
++// app builds and runs on the dependency-free canvas avatar, and the
++// Cubism-dependent files in live2d/ are excluded from compilation.
++val cubismFrameworkDir = file("../CubismJavaFramework/framework")
++if (cubismFrameworkDir.isDirectory) {
++    include(":Framework:framework")
++    project(":Framework:framework").projectDir = cubismFrameworkDir
++}

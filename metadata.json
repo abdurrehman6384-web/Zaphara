@@ -1,0 +1,6 @@
+{
+  "name": "Zaiphra",
+  "description": "Zaiphra - A sharp, elegant, and highly capable AI assistant.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
